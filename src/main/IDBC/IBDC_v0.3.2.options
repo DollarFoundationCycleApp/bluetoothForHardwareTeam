@@ -1,0 +1,2 @@
+IDBC.ImageChunk.payload         max_size:512
+IDBC.PendingEventList.event_ids max_count:16

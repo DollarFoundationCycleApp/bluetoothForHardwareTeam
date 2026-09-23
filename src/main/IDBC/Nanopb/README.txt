@@ -1,0 +1,1 @@
+These files are for protobuf on the ESP32. They replace the nanoPB library.
