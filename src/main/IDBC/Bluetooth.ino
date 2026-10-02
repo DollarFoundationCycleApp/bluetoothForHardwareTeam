@@ -3,6 +3,11 @@
 #include <Preferences.h>
 #include "esp_bt.h"
 
+// --- Nanopb Includes ---
+#include <pb_decode.h>
+#include <pb_encode.h>
+#include "IBDC_v0.3.2.pb.h"
+
 // --- Custom UUIDs for Data/File Transfers ---
 #define SERVICE_UUID_DATA      "D4A51F4B-93EF-4AB1-B2B6-0E445CC297BA"
 #define CHARACTERISTIC_UUID_RX "D4A51F4C-93EF-4AB1-B2B6-0E445CC297BA"
@@ -27,11 +32,15 @@ Preferences preferences;
 char recentDevices[MAX_SAVED_DEVICES][MAC_STR_LEN]; 
 int savedDeviceCount = 0;
 
+// Function Prototypes
 void loadSavedDevices();
 void saveDeviceAddress(const char* macAddr);
 void printSavedDevices();
+bool sendDeviceToAppResponse(const IDBC_DeviceToApp* response);
+void handleProtobufCommand(const IDBC_AppToDevice* appCmd);
+void notifyPhoneOfEvent(uint32_t eventId, uint32_t distanceCm, uint32_t timeOffsetMs, uint32_t imageCount, uint32_t format);
 
-// Minimal HID Keyboard Report Descriptor - AI generated
+// Minimal HID Keyboard Report Descriptor
 const uint8_t hidReportDescriptor[] = {
     0x05, 0x01, // USAGE_PAGE (Generic Desktop)
     0x09, 0x06, // USAGE (Keyboard)
@@ -60,47 +69,60 @@ class MyServerCallbacks: public NimBLEServerCallbacks {
         char clientMac[MAC_STR_LEN];
         snprintf(clientMac, sizeof(clientMac), "%s", connInfo.getAddress().toString().c_str());
 
-        Serial.print(F(">>> OS CONNECTED NATIVELY! Address: "));
-        Serial.print(clientMac);
-        Serial.println(F(" <<<"));
+        if (Serial) {
+            Serial.print(F(">>> OS CONNECTED NATIVELY! Address: "));
+            Serial.print(clientMac);
+            Serial.println(F(" <<<"));
+        }
 
         saveDeviceAddress(clientMac);
     }
 
     void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
         deviceConnected = false;
-        Serial.print(F(">>> BLE DISCONNECTED (Reason: "));
-        Serial.print(reason);
-        Serial.println(F("). Restarting Advertising... <<<"));
+        if (Serial) {
+            Serial.print(F(">>> BLE DISCONNECTED (Reason: "));
+            Serial.print(reason);
+            Serial.println(F("). Restarting Advertising... <<<"));
+        }
         
         NimBLEDevice::startAdvertising();
     }
 
     void onAuthenticationComplete(NimBLEConnInfo& connInfo) override {
         if (connInfo.isEncrypted()) {
-            Serial.println(F(">>> Pairing & Encryption Complete! Bound to Phone OS. <<<"));
+            if (Serial) {
+                Serial.println(F(">>> Pairing & Encryption Complete! Bound to Phone OS. <<<"));
+            }
         }
     }
 };
 
-// RX Callback for Custom Data / File Handling
+// RX Callback for Custom Data / Protobuf File Handling
 class RxCallbacks: public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic *pCharacteristic, NimBLEConnInfo& connInfo) override {
         std::string value = pCharacteristic->getValue();
-        if (value.length() > 0) {
-            Serial.print(F("Received Custom Data Packet ("));
-            Serial.print(value.length());
-            Serial.print(F(" bytes): "));
-            for (size_t i = 0; i < value.length(); i++) {
-                Serial.printf("%02X ", (uint8_t)value[i]);
+        if (value.length() == 0) return;
+
+        // Decode incoming Nanopb AppToDevice frame
+        IDBC_AppToDevice appCmd = IDBC_AppToDevice_init_default;
+        pb_istream_t stream = pb_istream_from_buffer(
+            reinterpret_cast<const uint8_t*>(value.data()), 
+            value.length()
+        );
+
+        if (pb_decode(&stream, IDBC_AppToDevice_fields, &appCmd)) {
+            handleProtobufCommand(&appCmd);
+        } else {
+            if (Serial) {
+                Serial.printf("Protobuf Decode Error: %s\n", PB_GET_ERROR(&stream));
             }
-            Serial.println();
         }
     }
 };
 
 void initBLE() {
-    // Release Classic BT memory footprint back to system heap - mem issues otherwise (attempt 1 to get back under psram)
+    // Release Classic BT memory footprint back to system heap
     esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
 
     loadSavedDevices();
@@ -109,10 +131,7 @@ void initBLE() {
     // Initialize NimBLE Stack
     NimBLEDevice::init(DEVICE_NAME);
 
-    // Clear existing ESP32 bond keys - Only use when upating connection algorithm
-    //NimBLEDevice::deleteAllBonds();
-
-    // Configure Security Capabilities for Native OS HID Pairing - stay connected after .2 ms
+    // Configure Security Capabilities for Native OS HID Pairing
     NimBLEDevice::setSecurityAuth(true, false, true); 
     NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT); 
 
@@ -121,9 +140,7 @@ void initBLE() {
     NimBLEServer *pServer = NimBLEDevice::createServer();
     pServer->setCallbacks(new MyServerCallbacks());
 
-    // -------------------------------------------------------------
-    // Service 1: Standard HID Keyboard Service - Negligible and could be truncated if need be.
-    // -------------------------------------------------------------
+    // Service 1: Standard HID Keyboard Service
     NimBLEService *pHidService = pServer->createService(HID_SERVICE_UUID);
 
     NimBLECharacteristic *pHidInfo = pHidService->createCharacteristic(
@@ -146,9 +163,7 @@ void initBLE() {
     uint8_t mode = 0x01;
     pProtocolMode->setValue(&mode, 1);
 
-    // -------------------------------------------------------------
-    // Service 2: Custom Service (For File / Data Transfer) - what we're here to use
-    // -------------------------------------------------------------
+    // Service 2: Custom Service (For Protobuf / File / Data Transfer)
     NimBLEService *pDataService = pServer->createService(SERVICE_UUID_DATA);
 
     pTxCharacteristic = pDataService->createCharacteristic(
@@ -162,35 +177,32 @@ void initBLE() {
                                              );
     pRxCharacteristic->setCallbacks(new RxCallbacks());
 
-    // -------------------------------------------------------------
-    // Service 3: Auto Reconnect to devices in our list
-    // -------------------------------------------------------------
+    // Service 3: Advertising Configuration
     NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
     pAdvertising->setName(DEVICE_NAME);
-    pAdvertising->setAppearance(0x03C1); // Standard Keyboard Icon for phone UI
+    pAdvertising->setAppearance(0x03C1); // Standard Keyboard Icon
     pAdvertising->addServiceUUID(HID_SERVICE_UUID);
     pAdvertising->addServiceUUID(SERVICE_UUID_DATA);
-    pAdvertising->enableScanResponse(false); // Reduced advertising allocation payload
+    pAdvertising->enableScanResponse(false);
 
-    // Check if we have a valid saved address
     if (savedDeviceCount > 0 && strlen(recentDevices[0]) > 0) {
         NimBLEAddress targetAddr(std::string(recentDevices[0]), BLE_ADDR_PUBLIC);
         if (Serial) {
-          Serial.print(F(">>> Attempting Direct Auto-Reconnect to Last Device: "));
-          Serial.println(recentDevices[0]);
+            Serial.print(F(">>> Attempting Direct Auto-Reconnect to Last Device: "));
+            Serial.println(recentDevices[0]);
         }
 
         NimBLEDevice::whiteListAdd(targetAddr);
         pAdvertising->setScanFilter(false, false);
     } else {
-      if (Serial) {
-        Serial.println(F(">>> No saved devices. Advertising for new pairing..."));
-      }
+        if (Serial) {
+            Serial.println(F(">>> No saved devices. Advertising for new pairing..."));
+        }
     }
 
     pAdvertising->start();
 
-    if(Serial) {
+    if (Serial) {
         Serial.println(F("========================================"));
         Serial.print(F("BLE Server Started: "));
         Serial.println(DEVICE_NAME);
@@ -200,7 +212,7 @@ void initBLE() {
 }
 
 /**
- * Loads saved MAC addresses from NVS flash storage using fixed char buffers.
+ * Loads saved MAC addresses from NVS flash storage.
  */
 void loadSavedDevices() {
     preferences.begin("ble_devices", true);
@@ -221,7 +233,7 @@ void loadSavedDevices() {
 }
 
 /**
- * Saves connected MAC address to flash storage
+ * Saves connected MAC address to flash storage.
  */
 void saveDeviceAddress(const char* macAddr) {
     if (macAddr == nullptr || macAddr[0] == '\0') return;
@@ -254,7 +266,7 @@ void saveDeviceAddress(const char* macAddr) {
     }
     preferences.end();
 
-    if(Serial) {
+    if (Serial) {
         Serial.println(F("Updated Recent Devices List:"));
         printSavedDevices();
     }
@@ -264,7 +276,7 @@ void saveDeviceAddress(const char* macAddr) {
  * Output recent devices to Serial Monitor.
  */
 void printSavedDevices() {
-    if(Serial) {
+    if (Serial) {
         Serial.println(F("--- Saved Recent Devices (Max 3) ---"));
         if (savedDeviceCount == 0) {
             Serial.println(F("  (None)"));
@@ -278,4 +290,103 @@ void printSavedDevices() {
         }
         Serial.println(F("------------------------------------"));
     }
+}
+
+/**
+ * Sends a DeviceToApp protobuf message back to the phone via pTxCharacteristic.
+ */
+bool sendDeviceToAppResponse(const IDBC_DeviceToApp* response) {
+    if (!pTxCharacteristic || !deviceConnected) {
+        return false;
+    }
+
+    uint8_t buffer[IDBC_DeviceToApp_size];
+    pb_ostream_t stream = pb_ostream_from_buffer(buffer, sizeof(buffer));
+
+    if (!pb_encode(&stream, IDBC_DeviceToApp_fields, response)) {
+        if (Serial) {
+            Serial.printf("Nanopb encoding failed: %s\n", PB_GET_ERROR(&stream));
+        }
+        return false;
+    }
+
+    pTxCharacteristic->setValue(buffer, stream.bytes_written);
+    pTxCharacteristic->notify();
+    return true;
+}
+
+/**
+ * Processes incoming protobuf AppToDevice requests.
+ */
+void handleProtobufCommand(const IDBC_AppToDevice* appCmd) {
+    switch (appCmd->which_payload) {
+        case IDBC_AppToDevice_image_transfer_request_tag: {
+            const auto& req = appCmd->payload.image_transfer_request;
+            if (Serial) {
+                Serial.printf("Proto Req: Transfer Image - Event ID: %lu, Start Img: %lu, Start Chunk: %lu\n", 
+                              req.event_id, req.start_from_image, req.start_from_chunk);
+            }
+            // TODO: Trigger image chunk transfer logic
+            break;
+        }
+
+        case IDBC_AppToDevice_event_transfer_ack_tag: {
+            const auto& ack = appCmd->payload.event_transfer_ack;
+            if (Serial) {
+                Serial.printf("Proto ACK: Event ID %lu confirmed by phone.\n", ack.event_id);
+            }
+            // TODO: Mark event as completed or purge from storage
+            break;
+        }
+
+        case IDBC_AppToDevice_settings_tag: {
+            const auto& settings = appCmd->payload.settings;
+            if (Serial) {
+                Serial.printf("Proto Req: Settings Update Request - Images Per Event: %lu\n", settings.images_per_event);
+            }
+            break;
+        }
+
+        case IDBC_AppToDevice_pending_event_list_request_tag: {
+            if (Serial) {
+                Serial.println("Proto Req: Pending Event List Requested.");
+            }
+            
+            IDBC_DeviceToApp resp = IDBC_DeviceToApp_init_default;
+            resp.which_payload = IDBC_DeviceToApp_pending_event_list_tag;
+            resp.payload.pending_event_list.event_ids_count = 0; // Populate with active event count
+            sendDeviceToAppResponse(&resp);
+            break;
+        }
+
+        case IDBC_AppToDevice_event_info_request_tag: {
+            const auto& infoReq = appCmd->payload.event_info_request;
+            if (Serial) {
+                Serial.printf("Proto Req: Event Info for Event ID %lu\n", infoReq.event_id);
+            }
+            break;
+        }
+
+        default:
+            if (Serial) {
+                Serial.printf("Unknown Protobuf payload tag: %d\n", appCmd->which_payload);
+            }
+            break;
+    }
+}
+
+/**
+ * Helper function to send event notifications over BLE.
+ */
+void notifyPhoneOfEvent(uint32_t eventId, uint32_t distanceCm, uint32_t timeOffsetMs, uint32_t imageCount, uint32_t format) {
+    IDBC_DeviceToApp msg = IDBC_DeviceToApp_init_default;
+    msg.which_payload = IDBC_DeviceToApp_event_notification_tag;
+    
+    msg.payload.event_notification.event_id = eventId;
+    msg.payload.event_notification.distance_cm = distanceCm;
+    msg.payload.event_notification.time_offset_ms = timeOffsetMs;
+    msg.payload.event_notification.image_count = imageCount;
+    msg.payload.event_notification.image_format = static_cast<IDBC_ImageFormat>(format);
+
+    sendDeviceToAppResponse(&msg);
 }
