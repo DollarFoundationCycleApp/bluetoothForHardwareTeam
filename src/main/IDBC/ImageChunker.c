@@ -72,7 +72,7 @@ bool buildImageChunk(
      * Chunk 2 -> byte 800
      * ...
      */
-    size_t offset = (size_t)(*chunkSequence) * IMAGE_CHUNK_DATA_SIZE;
+    size_t offset = (size_t)chunkSequence * IMAGE_CHUNK_DATA_SIZE;
 
     // Determine how many bytes remain in the image.
     size_t remaining = image->size - offset;
