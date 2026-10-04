@@ -7,11 +7,8 @@
 
 #include "IBDC_v0.3.2.pb.h"
 
-/*
- * Maximum number of image bytes carried by one ImageChunk.
- *
- * This is the project's chosen Bluetooth payload size.
- */
+
+// Maximum number of image bytes carried by one ImageChunk.
 #define IMAGE_CHUNK_DATA_SIZE 400
 
 /*
@@ -48,9 +45,7 @@ size_t calculateTotalChunks(size_t imageSize);
 
 /*
  * Builds one ImageChunk from an ImageData object.
- *
  * chunkSequence identifies which 400-byte section to build.
- *
  * Returns true if the chunk was successfully created.
  */
 bool buildImageChunk(

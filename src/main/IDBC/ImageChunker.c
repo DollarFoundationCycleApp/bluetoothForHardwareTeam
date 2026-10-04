@@ -13,30 +13,19 @@ bool detectImageFormat(
         return false;
     }
 
-    /*
-     * JPEG files begin with FF D8.
-     */
-    if (size >= 2 &&
-        data[0] == 0xFF &&
-        data[1] == 0xD8) {
-
+    // JPEG files begin with FF D8.
+    if (size >= 2 && data[0] == 0xFF && data[1] == 0xD8) {
         *format = IDBC_ImageFormat_IMAGE_FORMAT_JPEG;
         return true;
     }
 
-    /*
-     * PNG files begin with:
-     *
-     * 89 50 4E 47 0D 0A 1A 0A
-     */
+    // PNG files begin with: 89 50 4E 47 0D 0A 1A 0A
     static const uint8_t pngSignature[] = {
         0x89, 0x50, 0x4E, 0x47,
         0x0D, 0x0A, 0x1A, 0x0A
     };
 
-    if (size >= sizeof(pngSignature) &&
-        memcmp(data, pngSignature, sizeof(pngSignature)) == 0) {
-
+    if (size >= sizeof(pngSignature) && memcmp(data, pngSignature, sizeof(pngSignature)) == 0) {
         *format = IDBC_ImageFormat_IMAGE_FORMAT_PNG;
         return true;
     }
@@ -50,8 +39,7 @@ size_t calculateTotalChunks(size_t imageSize) {
         return 0;
     }
 
-    return (imageSize + IMAGE_CHUNK_DATA_SIZE - 1)
-           / IMAGE_CHUNK_DATA_SIZE;
+    return (imageSize + IMAGE_CHUNK_DATA_SIZE - 1) / IMAGE_CHUNK_DATA_SIZE;
 }
 
 
@@ -60,8 +48,7 @@ bool buildImageChunk(
     uint32_t eventId,
     uint32_t imageIndex,
     uint32_t chunkSequence,
-    IDBC_ImageChunk* output
-) {
+    IDBC_ImageChunk* output) {
     if (image == NULL ||
         image->data == NULL ||
         output == NULL ||
@@ -72,9 +59,7 @@ bool buildImageChunk(
 
     size_t totalChunks = calculateTotalChunks(image->size);
 
-    /*
-     * Make sure the requested chunk actually exists.
-     */
+    // Make sure the requested chunk actually exists.
     if (chunkSequence >= totalChunks) {
         return false;
     }
@@ -87,54 +72,34 @@ bool buildImageChunk(
      * Chunk 2 -> byte 800
      * ...
      */
-    size_t offset =
-        (size_t)chunkSequence * IMAGE_CHUNK_DATA_SIZE;
+    size_t offset = (size_t)(*chunkSequence) * IMAGE_CHUNK_DATA_SIZE;
 
-    /*
-     * Determine how many bytes remain in the image.
-     */
+    // Determine how many bytes remain in the image.
     size_t remaining = image->size - offset;
 
-    /*
-     * Normally we copy 400 bytes.
-     *
-     * The final chunk may contain fewer than 400 bytes.
-     */
+    // Normally we copy 400 bytes. The final chunk may contain fewer than 400 bytes.
     size_t bytesToCopy = remaining;
 
     if (bytesToCopy > IMAGE_CHUNK_DATA_SIZE) {
         bytesToCopy = IMAGE_CHUNK_DATA_SIZE;
     }
 
-    /*
-     * Start with an empty protobuf message.
-     */
+    // Start with an empty protobuf message.
     *output = (IDBC_ImageChunk)IDBC_ImageChunk_init_default;
 
-    /*
-     * Fill in the ImageChunk metadata.
-     */
+    // Fill in the ImageChunk metadata.
     output->event_id = eventId;
     output->image_index = imageIndex;
     output->chunk_sequence = chunkSequence;
     output->total_chunks = (uint32_t)totalChunks;
 
-    /*
-     * True only for the final chunk.
-     */
-    output->is_last_chunk =
-        (chunkSequence == totalChunks - 1);
+    // True only for the final chunk.
+    output->is_last_chunk = (chunkSequence == totalChunks - 1);
 
-    /*
-     * Copy the actual image bytes into the protobuf payload.
-     */
+    // Copy the actual image bytes into the protobuf payload.
     output->payload.size = (pb_size_t)bytesToCopy;
 
-    memcpy(
-        output->payload.bytes,
-        image->data + offset,
-        bytesToCopy
-    );
+    memcpy(output->payload.bytes, image->data + offset, bytesToCopy);
 
     return true;
 }
