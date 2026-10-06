@@ -14,7 +14,6 @@ bool readFile(
 )
 {
     FILE* file = fopen(filename, "rb");
-
     if (file == NULL) {return false;}
 
     // Find the size of the file.
@@ -34,13 +33,12 @@ bool readFile(
 
     // Allocate enough memory for the entire image.
     uint8_t* buffer = malloc((size_t)fileSize);
-
     if (buffer == NULL) {
         fclose(file);
         return false;
     }
 
-    // Read the image bytes.
+    // Read the image bytes into buffer.
     size_t bytesRead = fread(buffer, 1, (size_t)fileSize, file);
 
     fclose(file);
