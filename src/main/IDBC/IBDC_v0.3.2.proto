@@ -1,0 +1,106 @@
+// IDBC protobuff v0.3.2, 2026-09-10
+
+syntax = "proto3";
+
+package IDBC;
+
+// Messages the phone sends to the embedded device.
+message AppToDevice {
+  oneof payload {
+    ImageTransferRequest image_transfer_request = 1;
+    EventTransferAck event_transfer_ack = 2;
+    Settings settings = 3;
+    PendingEventListRequest pending_event_list_request = 4;
+    EventInfoRequest event_info_request = 5;
+  }
+}
+
+// Messages the embedded device sends to the phone.
+message DeviceToApp {
+  oneof payload {
+    EventNotification event_notification = 1;
+    ImageInfo image_info = 2;
+    ImageChunk image_chunk = 3;
+    DeviceStatus device_status = 4;
+    PendingEventList pending_event_list = 5;
+  }
+}
+
+// Embedded system sends this at event detection.
+message EventNotification {
+  uint32 event_id = 1; // Unique ID for each event.
+  uint32 distance_cm = 2; // Distance to detected object in centimeters.
+  uint32 time_offset_ms = 3; // Time between detection and notification in milliseconds.
+  uint32 image_count = 4; // Number of images associated with this event.
+  ImageFormat image_format = 5; // Image format used for this event.
+}
+
+// Supported image formats.
+enum ImageFormat {
+  IMAGE_FORMAT_UNSPECIFIED = 0;
+  IMAGE_FORMAT_JPEG = 1;
+  IMAGE_FORMAT_PNG = 2;
+}
+
+// Metadata describing an individual image.
+// Phone can use this information to validate and track image transfer.
+message ImageInfo {
+  uint32 event_id = 1; // Event this image belongs to.
+  uint32 image_index = 2; // Zero-based image number within the event.
+  uint32 image_size_bytes = 3; // Total image size in bytes.
+  uint32 total_chunks = 4; // Total number of BLE chunks for this image.
+  ImageFormat image_format = 5; // Format of this image.
+}
+
+// Header and payload for each image chunk sent over BLE.
+message ImageChunk {
+  uint32 event_id = 1; // Event this image belongs to.
+  uint32 image_index = 2; // Zero-based image number within the event.
+  uint32 chunk_sequence = 3; // Zero-based chunk sequence number.
+  bool is_last_chunk = 4; // True if this is the final chunk.
+  bytes payload = 5; // Raw image bytes contained in this chunk.
+  uint32 total_chunks = 6; // Total number of chunks for this image.
+}
+
+// Phone requests an image transfer.
+// Can be used for initial transfer, delayed transfer, or resuming after a disconnect.
+message ImageTransferRequest {
+  uint32 event_id = 1; // Event whose images are requested.
+  uint32 start_from_image = 2; // Zero-based image index to start from.
+  uint32 start_from_chunk = 3; // Zero-based chunk sequence number to start from.
+}
+
+// Phone acknowledges successful receipt of an entire event and all associated images.
+// After this ACK, the embedded system may mark the event complete or delete it to save space.
+message EventTransferAck {
+  uint32 event_id = 1; // Event successfully received and validated by the phone.
+}
+
+// Phone writes settings to the embedded system.
+message Settings {
+  uint32 images_per_event = 1; // Number of images captured per event.
+}
+
+// Embedded system exposes current device status.
+message DeviceStatus {
+  uint32 protocol_version = 1; // Protocol version used by the device.
+  uint32 battery_percent = 2; // Battery percentage, 0-100.
+  uint32 pending_events = 3; // Number of events not yet acknowledged by the phone.
+  uint32 storage_available_percent = 4; // Available storage percentage, 0-100.
+  uint32 images_per_event_setting =5; //Current image per event setting stored on embedded device.
+}
+
+// Phone requests a list of pending events.
+// Empty message because the list request has no parameters.
+message PendingEventListRequest {}
+
+// Embedded system responds with IDs of events that have not been acknowledged by the phone.
+message PendingEventList {
+  repeated uint32 event_ids = 1; // Unique event IDs.
+}
+
+// Phone requests information for a specific event.
+// The embedded system should respond by sending EventNotification for the requested event.
+message EventInfoRequest {
+  uint32 event_id = 1; // Event whose notification information is requested.
+}

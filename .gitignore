@@ -58,6 +58,8 @@ dkms.conf
 .gradle
 **/build/
 !**/src/**/build/
+test_images/reconstructed.jpg
+test_images/reconstructed.png
 
 # Ignore Gradle GUI config
 gradle-app.setting
