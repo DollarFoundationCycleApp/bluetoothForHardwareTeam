@@ -1,5 +1,48 @@
 # bluetoothForHardwareTeam
 
+## Proto testing
+
+Adding the documentation here so others can use it when they have access. In the IDBC.ino file from the hardware team at the top add:
+
+```Arduino
+
+#include "IBDC_v0.3.2.pb.h"
+// Forward declarations for BLE symbols in Bluetooth.ino
+extern bool deviceConnected;
+void initBLE();
+void notifyPhoneOfEvent(uint32_t eventId, uint32_t distanceCm, uint32_t timeOffsetMs, uint32_t imageCount, uint32_t format);
+//Button
+const int buttonPin = 4;
+unsigned long lastButtonPressMs = 0;
+const unsigned long debounceDelayMs = 200; // 200ms debounce
+uint32_t testEventId = 100;
+```
+
+and at the end of the loop method add:
+
+```Arduino
+  if (digitalRead(buttonPin) == LOW) {
+    if (millis() - lastButtonPressMs >= debounceDelayMs) {
+        lastButtonPressMs = millis();
+        
+        if (deviceConnected) {
+            Serial.println("Button pressed: Sending Protobuf Event Notification...");
+            
+            // Send a test EventNotification protobuf packet over BLE
+            notifyPhoneOfEvent(
+                testEventId++,                           // event_id
+                static_cast<uint32_t>(distanceInch * 2.54f), // distance_cm
+                millis(),                                // time_offset_ms
+                1,                                       // image_count
+                IDBC_ImageFormat_IMAGE_FORMAT_JPEG       // image_format
+            );
+        } else {
+            Serial.println("Button pressed, but BLE is not connected!");
+        }
+    }
+  }
+```
+
 ## Image Chunker Demo
 
 The Image Chunker demo demonstrates how an image is:
