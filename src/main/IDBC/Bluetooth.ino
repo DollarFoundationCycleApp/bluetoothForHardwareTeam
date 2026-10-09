@@ -47,16 +47,16 @@ const uint8_t hidReportDescriptor[] = {
     0xa1, 0x01, // COLLECTION (Application)
     0x85, 0x01, //   REPORT_ID (1)
     0x05, 0x07, //   USAGE_PAGE (Keyboard)
-    0x19, 0xe0, //   USAGE_MINIMUM (Keyboard Right GUI)
-    0x29, 0xe7, //   USAGE_MAXIMUM (Keyboard Right GUI)
+    0x19, 0x00, //   USAGE_MINIMUM (Keyboard Right GUI)
+    0x29, 0x65, //   USAGE_MAXIMUM (Keyboard Right GUI)
     0x15, 0x00, //   LOGICAL_MINIMUM (0)
-    0x25, 0x01, //   LOGICAL_MAXIMUM (1)
-    0x75, 0x01, //   REPORT_SIZE (1)
-    0x95, 0x08, //   REPORT_COUNT (8)
+    0x25, 0x65, //   LOGICAL_MAXIMUM (101)
+    0x75, 0x08, //   REPORT_SIZE (8)
+    0x95, 0x06, //   REPORT_COUNT (6)
     0x81, 0x02, //   INPUT (Data,Var,Abs)
     0x95, 0x01, //   REPORT_COUNT (1)
     0x75, 0x08, //   REPORT_SIZE (8)
-    0x81, 0x01, //   INPUT (Cnst,Ary,Abs)
+    0x81, 0x00, //   INPUT (Data,Ary,Abs)
     0xc0        // END_COLLECTION
 };
 
@@ -145,21 +145,34 @@ void initBLE() {
 
     NimBLECharacteristic *pHidInfo = pHidService->createCharacteristic(
                                         HID_INFORMATION_UUID,
-                                        NIMBLE_PROPERTY::READ
+                                        NIMBLE_PROPERTY::READ_ENC
                                      );
     const uint8_t hidInfoVal[] = {0x11, 0x01, 0x00, 0x02};
     pHidInfo->setValue(hidInfoVal, sizeof(hidInfoVal));
 
     NimBLECharacteristic *pReportMap = pHidService->createCharacteristic(
                                           HID_REPORT_MAP_UUID,
-                                          NIMBLE_PROPERTY::READ
+                                          NIMBLE_PROPERTY::READ_ENC
                                        );
     pReportMap->setValue(hidReportDescriptor, sizeof(hidReportDescriptor));
 
     NimBLECharacteristic *pProtocolMode = pHidService->createCharacteristic(
                                              PROTOCOL_MODE_UUID,
-                                             NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE_NR
+                                             NIMBLE_PROPERTY::READ_ENC | NIMBLE_PROPERTY::WRITE_NR
                                           );
+    // NimBLECharacteristic *pCtrl = pHidService->createCharacteristic(
+    //                                (uint16_t)0x2A4C, NIMBLE_PROPERTY::WRITE_NR);
+    
+    NimBLECharacteristic *pInput = pHidService->createCharacteristic(
+                                    (uint16_t)0x2A4D,
+                                    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::READ_ENC | NIMBLE_PROPERTY::WRITE_NR);
+
+    NimBLEDescriptor *pRef = pInput->createDescriptor(
+                                    (uint16_t)0x2908,
+                                    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::READ_ENC );
+    uint8_t refVal[] = {0x01, 0x01};
+    pRef->setValue(refVal, 2);
+
     uint8_t mode = 0x01;
     pProtocolMode->setValue(&mode, 1);
 
@@ -173,7 +186,7 @@ void initBLE() {
 
     NimBLECharacteristic *pRxCharacteristic = pDataService->createCharacteristic(
                                                CHARACTERISTIC_UUID_RX,
-                                               NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR
+                                               NIMBLE_PROPERTY::WRITE_ENC | NIMBLE_PROPERTY::WRITE_NR
                                              );
     pRxCharacteristic->setCallbacks(new RxCallbacks());
 
@@ -181,9 +194,9 @@ void initBLE() {
     NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
     pAdvertising->setName(DEVICE_NAME);
     pAdvertising->setAppearance(0x03C1); // Standard Keyboard Icon
-    pAdvertising->addServiceUUID(HID_SERVICE_UUID);
-    pAdvertising->addServiceUUID(SERVICE_UUID_DATA);
-    pAdvertising->enableScanResponse(false);
+    pAdvertising->setName(DEVICE_NAME);
+    pAdvertising->addServiceUUID(SERVICE_UUID_DATA); // Put data service first
+    pAdvertising->enableScanResponse(true);
 
     if (savedDeviceCount > 0 && strlen(recentDevices[0]) > 0) {
         NimBLEAddress targetAddr(std::string(recentDevices[0]), BLE_ADDR_PUBLIC);
@@ -200,6 +213,7 @@ void initBLE() {
         }
     }
 
+    //pHidService->start();
     pAdvertising->start();
 
     if (Serial) {
@@ -297,6 +311,9 @@ void printSavedDevices() {
  */
 bool sendDeviceToAppResponse(const IDBC_DeviceToApp* response) {
     if (!pTxCharacteristic || !deviceConnected) {
+        if(Serial){
+            Serial.printf("Error sending due to connection");
+        }
         return false;
     }
 
