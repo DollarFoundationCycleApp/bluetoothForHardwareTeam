@@ -6,7 +6,7 @@ Adding the documentation here so others can use it when they have access. In the
 
 ```Arduino
 
-#include "IBDC_v0.3.2.pb.h"
+#include "IBDC_v0.3.3.pb.h"
 // Forward declarations for BLE symbols in Bluetooth.ino
 extern bool deviceConnected;
 void initBLE();

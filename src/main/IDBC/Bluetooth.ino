@@ -6,7 +6,7 @@
 // --- Nanopb Includes ---
 #include <pb_decode.h>
 #include <pb_encode.h>
-#include "IBDC_v0.3.2.pb.h"
+#include "IBDC_v0.3.3.pb.h"
 
 // --- Custom UUIDs for Data/File Transfers ---
 #define SERVICE_UUID_DATA      "D4A51F4B-93EF-4AB1-B2B6-0E445CC297BA"
@@ -23,6 +23,15 @@
 #define MAX_SAVED_DEVICES 3
 #define MAC_STR_LEN       18 // Fixed length for "XX:XX:XX:XX:XX:XX"
 #define DEVICE_NAME       "Bike_CAM"
+
+// Function Prototypes
+void loadSavedDevices();
+void saveDeviceAddress(const char* macAddr);
+void printSavedDevices();
+bool sendDeviceToAppResponse(const IDBC_DeviceToApp* response);
+void handleProtobufCommand(const IDBC_AppToDevice* appCmd);
+void notifyPhoneOfEvent(uint32_t eventId, uint32_t distanceCm, uint32_t timeOffsetMs, uint32_t imageCount, uint32_t format);
+void requestAppTime();
 
 NimBLECharacteristic *pTxCharacteristic = nullptr;
 bool deviceConnected = false;
@@ -356,14 +365,6 @@ void handleProtobufCommand(const IDBC_AppToDevice* appCmd) {
             break;
         }
 
-        case IDBC_AppToDevice_settings_tag: {
-            const auto& settings = appCmd->payload.settings;
-            if (Serial) {
-                Serial.printf("Proto Req: Settings Update Request - Images Per Event: %lu\n", settings.images_per_event);
-            }
-            break;
-        }
-
         case IDBC_AppToDevice_pending_event_list_request_tag: {
             if (Serial) {
                 Serial.println("Proto Req: Pending Event List Requested.");
@@ -384,12 +385,34 @@ void handleProtobufCommand(const IDBC_AppToDevice* appCmd) {
             break;
         }
 
+        case IDBC_AppToDevice_app_time_response_tag: {
+            const auto& timeResp = appCmd->payload.app_time_response;
+            if (Serial) {
+                Serial.printf("Proto Resp: App Time Received - Timestamp: %llu ms\n", timeResp.timestamp_ms);
+            }
+            // TODO: Update your internal RTC or system time using timeResp.timestamp_ms
+            break;
+        }
+
         default:
             if (Serial) {
                 Serial.printf("Unknown Protobuf payload tag: %d\n", appCmd->which_payload);
             }
             break;
     }
+}
+
+/**
+ * Helper function to request the current time from the app.
+ */
+void requestAppTime() {
+    IDBC_DeviceToApp msg = IDBC_DeviceToApp_init_default;
+    msg.which_payload = IDBC_DeviceToApp_app_time_request_tag;
+    
+    if (Serial) {
+        Serial.println("Sending AppTimeRequest to phone...");
+    }
+    sendDeviceToAppResponse(&msg);
 }
 
 /**
