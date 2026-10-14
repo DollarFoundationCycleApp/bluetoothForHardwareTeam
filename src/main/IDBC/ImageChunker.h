@@ -7,6 +7,9 @@
 
 #include "IBDC_v0.3.2.pb.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 // Maximum number of image bytes carried by one ImageChunk.
 #define IMAGE_CHUNK_DATA_SIZE 400
@@ -55,5 +58,8 @@ bool buildImageChunk(
     uint32_t chunkSequence,
     IDBC_ImageChunk* output
 );
+#ifdef __cplusplus
+}
+#endif
 
 #endif

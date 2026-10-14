@@ -1,12 +1,16 @@
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <Preferences.h>
+#include <SD.h>
+#include <vector>
 #include "esp_bt.h"
+#include "ImageChunker.h" 
+#include "IncidentManager.h"
 
 // --- Nanopb Includes ---
 #include <pb_decode.h>
 #include <pb_encode.h>
-#include "IBDC_v0.3.3.pb.h"
+#include "IBDC_v0.3.2.pb.h"
 
 // --- Custom UUIDs for Data/File Transfers ---
 #define SERVICE_UUID_DATA      "D4A51F4B-93EF-4AB1-B2B6-0E445CC297BA"
@@ -24,6 +28,8 @@
 #define MAC_STR_LEN       18 // Fixed length for "XX:XX:XX:XX:XX:XX"
 #define DEVICE_NAME       "Bike_CAM"
 
+//extern std::vector<IncidentMetadata> pendingIncidents;
+
 // Function Prototypes
 void loadSavedDevices();
 void saveDeviceAddress(const char* macAddr);
@@ -31,7 +37,7 @@ void printSavedDevices();
 bool sendDeviceToAppResponse(const IDBC_DeviceToApp* response);
 void handleProtobufCommand(const IDBC_AppToDevice* appCmd);
 void notifyPhoneOfEvent(uint32_t eventId, uint32_t distanceCm, uint32_t timeOffsetMs, uint32_t imageCount, uint32_t format);
-void requestAppTime();
+//void requestAppTime();
 
 NimBLECharacteristic *pTxCharacteristic = nullptr;
 bool deviceConnected = false;
@@ -326,7 +332,7 @@ bool sendDeviceToAppResponse(const IDBC_DeviceToApp* response) {
         return false;
     }
 
-    uint8_t buffer[IDBC_DeviceToApp_size];
+    uint8_t buffer[1024];
     pb_ostream_t stream = pb_ostream_from_buffer(buffer, sizeof(buffer));
 
     if (!pb_encode(&stream, IDBC_DeviceToApp_fields, response)) {
@@ -347,52 +353,165 @@ bool sendDeviceToAppResponse(const IDBC_DeviceToApp* response) {
 void handleProtobufCommand(const IDBC_AppToDevice* appCmd) {
     switch (appCmd->which_payload) {
         case IDBC_AppToDevice_image_transfer_request_tag: {
-            const auto& req = appCmd->payload.image_transfer_request;
-            if (Serial) {
-                Serial.printf("Proto Req: Transfer Image - Event ID: %lu, Start Img: %lu, Start Chunk: %lu\n", 
+          const auto& req = appCmd->payload.image_transfer_request;
+          if (Serial) {
+            Serial.printf("Proto Req: Transfer Image - Event ID: %lu, Start Img: %lu, Start Chunk: %lu\n", 
                               req.event_id, req.start_from_image, req.start_from_chunk);
+          }
+          String targetFolder = findTargetPath(req.event_id);
+
+          if (targetFolder.length() == 0) {
+            if (Serial) {
+              Serial.println("[BLE Error] failed to find target folder");
             }
-            // TODO: Trigger image chunk transfer logic
             break;
-        }
+          }
+          bool success = handleImageRequest(targetFolder, req.event_id, req.start_from_image, req.start_from_chunk);
+          if (!success) {
+            if (Serial) {
+              Serial.println("[BLE Error] failed to handleImageRequest for Proto");
+            }
+          }  
+          break;
+      }
 
         case IDBC_AppToDevice_event_transfer_ack_tag: {
-            const auto& ack = appCmd->payload.event_transfer_ack;
-            if (Serial) {
-                Serial.printf("Proto ACK: Event ID %lu confirmed by phone.\n", ack.event_id);
+          const auto& ack = appCmd->payload.event_transfer_ack;
+          if (Serial) {
+              Serial.printf("[BLE] Got ACK from phone for Event ID %lu. Processing cleanup...\n", ack.event_id);
+          }
+            
+          bool foundAndCleaned = false;
+            
+          // Search vector for the acknowledged event ID
+          for (auto it = pendingIncidents.begin(); it != pendingIncidents.end(); ++it) {
+            if (it->eventId == ack.event_id) {
+              String folderPathToClean = it->folderPath;
+                    
+              // Remove from tracking vector first
+              pendingIncidents.erase(it);
+                    
+              // Recursively nuke the folder and all its contents off the SD card
+              if (removeDirRecursive(SD, folderPathToClean.c_str())) {
+                if(Serial) {
+                  Serial.printf("[SD] Successfully wiped acknowledged directory: %s\n", folderPathToClean.c_str());
+                }
+              } else {
+                if(Serial) {
+                  Serial.println("[SD ERROR] Failed to delete folder from SD card. Check if files are locked.");
+                }
+              }
+                    
+              foundAndCleaned = true;
+              break;
             }
-            // TODO: Mark event as completed or purge from storage
-            break;
+          }
+
+          if (!foundAndCleaned) {
+            if(Serial) {
+              Serial.printf("[BLE WARNING] Received ACK for Event ID %lu, but it wasn't found in the pending vector.\n", ack.event_id);
+            }
+          }
+          break;
         }
 
         case IDBC_AppToDevice_pending_event_list_request_tag: {
-            if (Serial) {
-                Serial.println("Proto Req: Pending Event List Requested.");
+          if (Serial) {
+            Serial.println("[BLE] Pending Event List Requested by app.");
+          }
+
+          IDBC_DeviceToApp resp = IDBC_DeviceToApp_init_default;
+          resp.which_payload = IDBC_DeviceToApp_pending_event_list_tag;
+
+          // Populate the static array defined in the nanopb header (max 16 entries)
+          resp.payload.pending_event_list.event_ids_count = 0;
+          for (const auto& inc : pendingIncidents) {
+            if (resp.payload.pending_event_list.event_ids_count < 16) {
+              uint32_t idx = resp.payload.pending_event_list.event_ids_count;
+              resp.payload.pending_event_list.event_ids[idx] = inc.eventId;
+              resp.payload.pending_event_list.event_ids_count++;
+            } else {
+              if (Serial) {
+                  Serial.println("[BLE WARNING] Pending event list truncated; exceeded max array size of 16.");
+              }
+              break;
             }
-            
-            IDBC_DeviceToApp resp = IDBC_DeviceToApp_init_default;
-            resp.which_payload = IDBC_DeviceToApp_pending_event_list_tag;
-            resp.payload.pending_event_list.event_ids_count = 0; // Populate with active event count
-            sendDeviceToAppResponse(&resp);
-            break;
+          }
+
+          if (Serial) {
+            Serial.printf("[BLE] Sending %u pending event IDs back to phone.\n", 
+                          resp.payload.pending_event_list.event_ids_count);
+          }
+
+          sendDeviceToAppResponse(&resp);
+          break;
         }
 
         case IDBC_AppToDevice_event_info_request_tag: {
-            const auto& infoReq = appCmd->payload.event_info_request;
+          const auto& infoReq = appCmd->payload.event_info_request;
+          if (Serial) {
+              Serial.printf("Proto Req: Event Info for Event ID %lu\n", infoReq.event_id);
+          }
+
+          String targetFolder = findTargetPath(infoReq.event_id);
+
+          if (targetFolder.length() == 0) {
             if (Serial) {
-                Serial.printf("Proto Req: Event Info for Event ID %lu\n", infoReq.event_id);
+              Serial.println("[BLE WARNING] Requested event info for an ID not found.");
             }
             break;
-        }
+          }
+          
+          File dir = SD.open(targetFolder);
+          uint32_t imgCount = 0;
+          if (dir && dir.isDirectory()) {
+            File file = dir.openNextFile();
+            while (file) {
+              if (!file.isDirectory()) {
+                String name = file.name();
+                if (name.endsWith(".jpg") || name.endsWith(".png")) {
+                  imgCount++;
+                }
+              }
+            }
+            dir.close();
+          }
+          //todo  get distance from csv 
+          uint32_t distanceCM = -100; // based on distance in col 2 next to ms in col 1
+          uint32_t timeOffset = 0; //based on image name
+          notifyPhoneOfEvent(
+            infoReq.event_id,
+            distanceCM,
+            timeOffset,
+            imgCount,
+            IDBC_ImageFormat_IMAGE_FORMAT_JPEG
+          );
 
-        case IDBC_AppToDevice_app_time_response_tag: {
+          if (Serial) {
+            Serial.printf("[BLE] Responded with EventNotification for ID %lu (Images: %lu)\n", 
+                          infoReq.event_id, imgCount);
+          }
+          break;
+        }
+        /*
+        case IDBC_AppToDevice_app_time_response_tag: { // todo
             const auto& timeResp = appCmd->payload.app_time_response;
             if (Serial) {
-                Serial.printf("Proto Resp: App Time Received - Timestamp: %llu ms\n", timeResp.timestamp_ms);
+                Serial.printf("Proto Resp: App Time Received - Time: %lu:%lu:%lu\n", 
+                              timeResp.hours, timeResp.minute, timeResp.seconds);
             }
             // TODO: Update your internal RTC or system time using timeResp.timestamp_ms
             break;
         }
+        case IDBC_AppToDevice_settings_tag: {
+            const auto& settings = appCmd->payload.settings;
+            if (Serial) {
+                Serial.printf("Proto Req: Settings Update Request - Images Per Event: %lu\n", settings.images_per_event);
+            }
+            //todo request information regarding who is in charge of settings.. is that us?
+            break;
+        }
+        */
 
         default:
             if (Serial) {
@@ -404,7 +523,7 @@ void handleProtobufCommand(const IDBC_AppToDevice* appCmd) {
 
 /**
  * Helper function to request the current time from the app.
- */
+ * /
 void requestAppTime() {
     IDBC_DeviceToApp msg = IDBC_DeviceToApp_init_default;
     msg.which_payload = IDBC_DeviceToApp_app_time_request_tag;
@@ -413,7 +532,7 @@ void requestAppTime() {
         Serial.println("Sending AppTimeRequest to phone...");
     }
     sendDeviceToAppResponse(&msg);
-}
+} // */
 
 /**
  * Helper function to send event notifications over BLE.
@@ -429,4 +548,126 @@ void notifyPhoneOfEvent(uint32_t eventId, uint32_t distanceCm, uint32_t timeOffs
     msg.payload.event_notification.image_format = static_cast<IDBC_ImageFormat>(format);
 
     sendDeviceToAppResponse(&msg);
+}
+
+/**
+  * Helper to build a response for an image based on an event tag
+*/
+bool handleImageRequest(const String& targetFolder, uint32_t eventId, uint32_t imageIndex, uint32_t startChunk) {
+  File dir = SD.open(targetFolder);
+  if (!dir || !dir.isDirectory()) {
+    if (Serial) {
+      Serial.printf("[SD ERROR] Failed to find or open incident folder path. %s\n", targetFolder.c_str());
+    }
+    return false;
+  }
+
+  std::vector<String> imageFiles; 
+  // build vector
+  File file = dir.openNextFile();
+  String name = "";
+  while (file) {
+    if (!file.isDirectory()) {
+      name = file.name();
+      if (name.endsWith(".jpg") || name.endsWith(".png")) {
+        imageFiles.push_back(name);
+      }
+    }
+    file.close();
+    file = dir.openNextFile();
+  }
+  dir.close();
+
+  //double check
+  if (imageIndex >= imageFiles.size()) {
+    if (Serial){
+      Serial.println("[BLE ERROR] Requested image index is out of bounds");
+    }
+    return false;
+  }
+
+  // open target, load it
+  String imgPath = targetFolder+ "/" + imageFiles[imageIndex];
+  File imgFile = SD.open(imgPath, FILE_READ);
+  if (!imgFile) {
+    if (Serial) {
+      Serial.println("[SD ERROR] Failed to open target image file for reading.");
+      return false;
+    }
+  }
+  
+  size_t imgSize = imgFile.size();
+  uint8_t *imgBuf = (uint8_t *)malloc(imgSize);
+  if (!imgBuf) {
+    if (Serial) {
+      Serial.println("[BLE ERROR] Malloc failed! Not enough heap for this Image Buffer");
+      imgFile.close();
+      return false;
+    }
+  }
+  imgFile.read(imgBuf, imgSize);
+  imgFile.close();
+
+  IDBC_ImageFormat format = IDBC_ImageFormat_IMAGE_FORMAT_JPEG;
+  detectImageFormat(imgBuf, imgSize, &format);
+
+  ImageData img = {
+      .data = imgBuf,
+      .size = imgSize,
+      .format = format
+  };
+   size_t totalChunks = calculateTotalChunks(imgSize);
+  //send imageInfo metapacket first so mobile knows whats up
+  IDBC_DeviceToApp infoResp = IDBC_DeviceToApp_init_default;
+  infoResp.which_payload = IDBC_DeviceToApp_image_info_tag;
+  infoResp.payload.image_info.event_id = eventId;
+  infoResp.payload.image_info.image_index = imageIndex; // Scoped parameter
+  infoResp.payload.image_info.image_size_bytes = imgSize;
+  infoResp.payload.image_info.total_chunks = totalChunks;
+  infoResp.payload.image_info.image_format = format;
+  sendDeviceToAppResponse(&infoResp);
+
+  vTaskDelay(pdMS_TO_TICKS(15)); // Give the BLE stack a breather
+
+  // stream chunks
+  for (uint32_t c = startChunk; c < totalChunks; c++) {
+    IDBC_ImageChunk chunk;
+    if (buildImageChunk(&img, eventId, imageIndex, c, &chunk)) {
+      IDBC_DeviceToApp chunkResp = IDBC_DeviceToApp_init_default;
+      chunkResp.which_payload = IDBC_DeviceToApp_image_chunk_tag;
+      chunkResp.payload.image_chunk = chunk;
+      sendDeviceToAppResponse(&chunkResp);
+
+      vTaskDelay(pdMS_TO_TICKS(3)); // real life needs delays for functions to work and helps explain why we need time tracking
+    }
+  }
+
+  free(imgBuf);
+  return true;
+}
+
+/**
+* helper to find target folder
+*/
+String findTargetPath(uint32_t event_id) {
+  String targetFolder = "";
+  bool found = false;
+  for (const auto& inc: pendingIncidents) {
+    if (inc.eventId == event_id) {
+      targetFolder = inc.folderPath;
+      found = true;
+      break;
+    }
+  }
+  if (!found) {
+    refreshList();
+    for (const auto& inc: pendingIncidents) {
+      if (inc.eventId == event_id) {
+        targetFolder = inc.folderPath;
+        found = true;
+        break;
+      }
+    }
+  }
+  return targetFolder;
 }

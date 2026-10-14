@@ -98,7 +98,6 @@ bool buildImageChunk(
 
     // Copy the actual image bytes into the protobuf payload.
     output->payload.size = (pb_size_t)bytesToCopy;
-
     memcpy(output->payload.bytes, image->data + offset, bytesToCopy);
 
     return true;
