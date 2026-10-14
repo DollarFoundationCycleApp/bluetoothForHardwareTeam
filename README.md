@@ -6,7 +6,7 @@ Adding the documentation here so others can use it when they have access. In the
 
 ```Arduino
 
-#include "IBDC_v0.3.3.pb.h"
+#include "IBDC_v0.3.32.pb.h"
 // Forward declarations for BLE symbols in Bluetooth.ino
 extern bool deviceConnected;
 void initBLE();
@@ -16,6 +16,12 @@ const int buttonPin = 4;
 unsigned long lastButtonPressMs = 0;
 const unsigned long debounceDelayMs = 200; // 200ms debounce
 uint32_t testEventId = 100;
+```
+
+Add this to setup after the other pinModes
+
+```Arduino
+  pinMode(buttonPin, INPUT_PULLUP);
 ```
 
 and at the end of the loop method add:
