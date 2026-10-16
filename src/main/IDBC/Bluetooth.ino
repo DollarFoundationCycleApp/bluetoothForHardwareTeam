@@ -671,3 +671,45 @@ String findTargetPath(uint32_t event_id) {
   }
   return targetFolder;
 }
+
+/** 
+* Test method to help run transfer acknowledgments
+*/ 
+void runTransferTest(int num, bool counter){
+  refreshList();
+  if (counter) {
+    int count = 0;
+    if (Serial) {
+      Serial.printf("[BLE TEST] Running transfer test for %d incidents...\n", num);
+    }
+    for(const auto& inc: pendingIncidents){
+      if (count >= num) {break;}
+      if (Serial) {
+        Serial.printf("[BLE TEST] Sending image transfer response for Event ID %lu, Folder: %s\n", inc.eventId, inc.folderPath.c_str());
+      }
+      handleImageRequest(inc.folderPath, inc.eventId, 0, 0);
+      count++;
+    }
+  } else {
+    bool found2 = false;
+    if (Serial) {
+      Serial.printf("[BLE TEST] Running transfer test for incident num %lu...\n", num);
+    }
+    for (const auto& inc: pendingIncidents) {
+      if (inc.eventId == num) {
+        if (Serial) {
+          Serial.printf("[BLE TEST] Found image transfer Event ID");
+        }
+        handleImageRequest(inc.folderPath, inc.eventId, 0, 0);
+        found2 = true;
+        break;
+      }
+    }
+
+    if (!found2) {
+      if (Serial) {
+        Serial.printf("[BLE TEST] Event ID %lu not found in pending incidents.\n", num);
+      }
+    }
+  }
+}

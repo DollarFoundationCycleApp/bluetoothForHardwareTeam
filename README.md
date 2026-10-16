@@ -34,6 +34,7 @@ and at the end of the loop method add:
         if (deviceConnected) {
             Serial.println("Button pressed: Sending Protobuf Event Notification...");
             
+            /*
             // Send a test EventNotification protobuf packet over BLE
             notifyPhoneOfEvent(
                 testEventId++,                           // event_id
@@ -41,7 +42,11 @@ and at the end of the loop method add:
                 millis(),                                // time_offset_ms
                 1,                                       // image_count
                 IDBC_ImageFormat_IMAGE_FORMAT_JPEG       // image_format
-            );
+            ); // */
+            // /*
+            // Test image transfer over proto
+            runTransferTest(11, false);
+            // */
         } else {
             Serial.println("Button pressed, but BLE is not connected!");
         }
