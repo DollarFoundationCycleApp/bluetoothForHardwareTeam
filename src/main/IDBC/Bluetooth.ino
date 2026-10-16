@@ -664,6 +664,9 @@ String findTargetPath(uint32_t event_id) {
     for (const auto& inc: pendingIncidents) {
       if (inc.eventId == event_id) {
         targetFolder = inc.folderPath;
+        if (Serial) {
+          Serial.println("Found the target folder");
+        }
         found = true;
         break;
       }
@@ -691,7 +694,6 @@ void runTransferTest(int num, bool counter){
       count++;
     }
   } else {
-    bool found2 = false;
     if (Serial) {
       Serial.printf("[BLE TEST] Running transfer test for incident num %lu...\n", num);
     }
@@ -701,14 +703,7 @@ void runTransferTest(int num, bool counter){
           Serial.printf("[BLE TEST] Found image transfer Event ID");
         }
         handleImageRequest(inc.folderPath, inc.eventId, 0, 0);
-        found2 = true;
         break;
-      }
-    }
-
-    if (!found2) {
-      if (Serial) {
-        Serial.printf("[BLE TEST] Event ID %lu not found in pending incidents.\n", num);
       }
     }
   }
