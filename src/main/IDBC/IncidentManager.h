@@ -8,7 +8,7 @@
 
 // 1. Define the struct where both files can see it
 struct IncidentMetadata {
-    uint32_t eventId;
+    unsigned long eventId;
     String folderPath;
 };
 

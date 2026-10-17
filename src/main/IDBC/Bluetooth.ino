@@ -553,8 +553,21 @@ void notifyPhoneOfEvent(uint32_t eventId, uint32_t distanceCm, uint32_t timeOffs
 /**
   * Helper to build a response for an image based on an event tag
 */
-bool handleImageRequest(const String& targetFolder, uint32_t eventId, uint32_t imageIndex, uint32_t startChunk) {
+bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageIndex, uint32_t startChunk) {
   Serial.println("Before");
+  if (targetFolder.length() == 0) {
+    if(Serial){
+      Serial.printf("[BLE ERROR] target folder for Event:%lu is invalid\n", eventId);
+    }
+    refreshList();
+    targetFolder = findTargetPath((unsigned long)eventId);
+    if (targetFolder.length() == 0) {
+      if(Serial){
+        Serial.println("[BLE Error] Attempted refresh failed.");
+      }
+      return false;
+    }
+  }
   File dir = SD.open(targetFolder);/// ISSUE HERE
   Serial.println("After");
   if (!dir || !dir.isDirectory()) {
@@ -651,9 +664,13 @@ bool handleImageRequest(const String& targetFolder, uint32_t eventId, uint32_t i
 /**
 * helper to find target folder
 */
-String findTargetPath(uint32_t event_id) {
+String findTargetPath(unsigned long event_id) {
   String targetFolder = "/";
   bool found = false;
+  if (Serial) {
+    Serial.printf("[BLE Debug] pendingIncidents has %d incidents\n", pendingIncidents.size());
+    Serial.printf("[BLE Debug] pendingIncidents has %u max size \n", pendingIncidents.max_size());
+  }
   for (const auto& inc: pendingIncidents) { /// pendingIncidents possibly empty: why?
     if (inc.eventId == event_id) {
       targetFolder = inc.folderPath;
@@ -697,7 +714,7 @@ void runTransferTest(int num, bool counter){
     }
   } else {
     if (Serial) {
-      Serial.printf("[BLE TEST] Running transfer test for incident num %lu...\n", num);
+      Serial.printf("[BLE TEST] Running transfer test for incident num %d...\n", num);
     }
     for (const auto& inc: pendingIncidents) {
       if (inc.eventId == num) {

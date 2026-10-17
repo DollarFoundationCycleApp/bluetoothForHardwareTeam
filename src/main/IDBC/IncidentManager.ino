@@ -27,7 +27,7 @@ void queueIncidentFolders(const char* baseFolderPath) {
             if (dirName.startsWith("incident")) {
                 String fullPath = String(baseFolderPath) + "/" + dirName;
                 String incidentNumStr = dirName.substring(8);
-                uint32_t eventId = (uint32_t)incidentNumStr.toInt();
+                uint32_t eventId = strtoul(incidentNumStr.c_str(), NULL, 10);
 
                 IncidentMetadata meta = {
                     .eventId = eventId,
@@ -36,6 +36,7 @@ void queueIncidentFolders(const char* baseFolderPath) {
                 pendingIncidents.push_back(meta);
                 if (Serial){
                   Serial.printf("Queued incident folder: %s\n", fullPath.c_str());
+                  Serial.printf("[BLE Debug] EventId: %lu", eventId);
                 }
             }
         }
@@ -78,8 +79,14 @@ bool removeDirRecursive(fs::FS &fs, const char *path) {
 * Helper to build queue again to encompass new incidents
 */
 void refreshList() {
-  if(pendingIncidents.empty()){
+  if(!pendingIncidents.empty()){
     pendingIncidents.clear();
   }
   queueIncidentFolders("/");
+  if(pendingIncidents.empty()){ // attempting a new path to get it. Depends on SD for various ways that can work
+    queueIncidentFolders("");
+  }
+  if(pendingIncidents.empty()) {
+    queueIncidentFolders("./");
+  }
 }
