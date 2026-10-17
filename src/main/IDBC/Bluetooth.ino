@@ -358,7 +358,7 @@ void handleProtobufCommand(const IDBC_AppToDevice* appCmd) {
             Serial.printf("Proto Req: Transfer Image - Event ID: %lu, Start Img: %lu, Start Chunk: %lu\n", 
                               req.event_id, req.start_from_image, req.start_from_chunk);
           }
-          String targetFolder = findTargetPath(req.event_id);
+          String targetFolder = findTargetPath(req.event_id);/// ISSUE HERE (event_id is possibly wrong)
 
           if (targetFolder.length() == 0) {
             if (Serial) {
@@ -554,7 +554,9 @@ void notifyPhoneOfEvent(uint32_t eventId, uint32_t distanceCm, uint32_t timeOffs
   * Helper to build a response for an image based on an event tag
 */
 bool handleImageRequest(const String& targetFolder, uint32_t eventId, uint32_t imageIndex, uint32_t startChunk) {
-  File dir = SD.open(targetFolder);
+  Serial.println("Before");
+  File dir = SD.open(targetFolder);/// ISSUE HERE
+  Serial.println("After");
   if (!dir || !dir.isDirectory()) {
     if (Serial) {
       Serial.printf("[SD ERROR] Failed to find or open incident folder path. %s\n", targetFolder.c_str());
@@ -650,9 +652,9 @@ bool handleImageRequest(const String& targetFolder, uint32_t eventId, uint32_t i
 * helper to find target folder
 */
 String findTargetPath(uint32_t event_id) {
-  String targetFolder = "";
+  String targetFolder = "/";
   bool found = false;
-  for (const auto& inc: pendingIncidents) {
+  for (const auto& inc: pendingIncidents) { /// pendingIncidents possibly empty: why?
     if (inc.eventId == event_id) {
       targetFolder = inc.folderPath;
       found = true;
@@ -661,7 +663,7 @@ String findTargetPath(uint32_t event_id) {
   }
   if (!found) {
     refreshList();
-    for (const auto& inc: pendingIncidents) {
+    for (const auto& inc: pendingIncidents) { /// pendingIncidents possibly empty: why?
       if (inc.eventId == event_id) {
         targetFolder = inc.folderPath;
         if (Serial) {
