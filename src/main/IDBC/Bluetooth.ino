@@ -612,6 +612,17 @@ bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageInd
   }
   
   size_t imgSize = imgFile.size();
+
+  // Verify that image file is not empty
+  if(imgSize == 0) {
+    if (Serial) {
+      Serial.println("[BLE ERROR] Image file is empty.");
+    }
+
+    imgFile.close();
+    return false;
+  }
+
   uint8_t *imgBuf = (uint8_t *)malloc(imgSize);
   if (!imgBuf) {
     if (Serial) {
@@ -620,11 +631,28 @@ bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageInd
       return false;
     }
   }
-  imgFile.read(imgBuf, imgSize);
+  size_t bytesRead = imgFile.read(imgBuf, imgSize);
   imgFile.close();
 
-  IDBC_ImageFormat format = IDBC_ImageFormat_IMAGE_FORMAT_JPEG;
-  detectImageFormat(imgBuf, imgSize, &format);
+  // Verify that all bytes for the image were successfully read
+  if (bytesRead != imgSize) {
+    if (Serial) {
+      Serial.println("[BLE ERROR] Failed to read the complete image.");
+    }
+
+    free(imgBuf);
+    return false;
+  }
+
+  IDBC_ImageFormat format;
+  if (!detectImageFormat(imgBuf, imgSize, &format)) {
+    if (Serial) {
+      Serial.println("[BLE ERROR] Unsupported or invalid image format.");
+    }
+
+    free(imgBuf);
+    return false;
+  }
 
   ImageData img = {
       .data = imgBuf,
