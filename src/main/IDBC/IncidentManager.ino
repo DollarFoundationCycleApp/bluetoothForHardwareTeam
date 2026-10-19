@@ -24,20 +24,29 @@ void queueIncidentFolders(const char* baseFolderPath) {
     while (entry) {
         if (entry.isDirectory()) {
             String dirName = String(entry.name());
-            if (dirName.startsWith("incident")) {
-                String fullPath = String(baseFolderPath) + "/" + dirName;
-                String incidentNumStr = dirName.substring(8);
-                uint32_t eventId = strtoul(incidentNumStr.c_str(), NULL, 10);
+            if (dirName.startsWith("incident")) { 
+              bool alreadyExists = false;
+              String fullPath = String(baseFolderPath) + "/" + dirName;
+              String incidentNumStr = dirName.substring(8);
+              uint32_t eventId = strtoul(incidentNumStr.c_str(), NULL, 10);
 
-                IncidentMetadata meta = {
-                    .eventId = eventId,
-                    .folderPath = fullPath
-                };
-                pendingIncidents.push_back(meta);
+              IncidentMetadata meta = {
+                  .eventId = eventId,
+                  .folderPath = fullPath
+              };
+              for (const auto& inc : pendingIncidents) {
+                  if (inc.eventId == eventId) {
+                      alreadyExists = true;
+                      break;
+                  }
+              }
+              if (!alreadyExists) {
+                  pendingIncidents.push_back(meta);
                 if (Serial){
-                  Serial.printf("Queued incident folder: %s\n", fullPath.c_str());
-                  Serial.printf("[BLE Debug] EventId: %lu", eventId);
+                  Serial.printf("Queued incident folder: %s  ", meta.folderPath);
+                  Serial.printf("[BLE Debug] EventId: %lu\n", meta.eventId);
                 }
+              }
             }
         }
         entry.close();

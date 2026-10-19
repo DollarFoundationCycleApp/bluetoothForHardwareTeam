@@ -21,7 +21,7 @@ void notifyPhoneOfEvent(uint32_t eventId, uint32_t distanceCm, uint32_t timeOffs
 const int buttonPin = 4;
 unsigned long lastButtonPressMs = 0;
 const unsigned long debounceDelayMs = 200; // 200ms debounce
-uint32_t testEventId = 100;
+//uint32_t testEventId = 1; //100;
 
 
 // ultrasonic variables
@@ -720,7 +720,7 @@ void loop() {
     digitalWrite(yellowLEDPin, LOW);
     digitalWrite(greenLEDPin,  HIGH);
   }
-    if (digitalRead(buttonPin) == LOW) {
+  if (digitalRead(buttonPin) == LOW) {
     if (millis() - lastButtonPressMs >= debounceDelayMs) {
         lastButtonPressMs = millis();
         
@@ -729,28 +729,7 @@ void loop() {
             
             // Send a test EventNotification protobuf packet over BLE
             notifyPhoneOfEvent(
-                testEventId++,                           // event_id
-                static_cast<uint32_t>(distanceInch * 2.54f), // distance_cm
-                millis(),                                // time_offset_ms
-                1,                                       // image_count
-                IDBC_ImageFormat_IMAGE_FORMAT_JPEG       // image_format
-            );
-        } else {
-            Serial.println("Button pressed, but BLE is not connected!");
-        }
-    }
-  }
-    if (digitalRead(buttonPin) == LOW) {
-    if (millis() - lastButtonPressMs >= debounceDelayMs) {
-        lastButtonPressMs = millis();
-        
-        if (deviceConnected) {
-            Serial.println("Button pressed: Sending Protobuf Event Notification...");
-            
-            /*
-            // Send a test EventNotification protobuf packet over BLE
-            notifyPhoneOfEvent(
-                testEventId++,                           // event_id
+                11,                           // event_id
                 static_cast<uint32_t>(distanceInch * 2.54f), // distance_cm
                 millis(),                                // time_offset_ms
                 1,                                       // image_count

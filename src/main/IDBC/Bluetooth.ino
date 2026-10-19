@@ -30,15 +30,6 @@
 
 //extern std::vector<IncidentMetadata> pendingIncidents;
 
-// Function Prototypes
-void loadSavedDevices();
-void saveDeviceAddress(const char* macAddr);
-void printSavedDevices();
-bool sendDeviceToAppResponse(const IDBC_DeviceToApp* response);
-void handleProtobufCommand(const IDBC_AppToDevice* appCmd);
-void notifyPhoneOfEvent(uint32_t eventId, uint32_t distanceCm, uint32_t timeOffsetMs, uint32_t imageCount, uint32_t format);
-//void requestAppTime();
-
 NimBLECharacteristic *pTxCharacteristic = nullptr;
 bool deviceConnected = false;
 
@@ -344,6 +335,7 @@ bool sendDeviceToAppResponse(const IDBC_DeviceToApp* response) {
 
     pTxCharacteristic->setValue(buffer, stream.bytes_written);
     pTxCharacteristic->notify();
+    Serial.println("[BLE DEBUG] SENT");
     return true;
 }
 
@@ -575,13 +567,14 @@ bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageInd
     }
   }
   Serial.println("[DEBUG] Before SD.open");
-  Serial.println(targetFolder);
+  Serial.println("Target folder: " + targetFolder);
   File dir = SD.open(targetFolder);/// ISSUE HERE
   Serial.println("[DEBUG] After SD.open");
   if (!dir || !dir.isDirectory()) {
     if (Serial) {
       Serial.printf("[SD ERROR] Failed to find or open incident folder path. %s\n", targetFolder.c_str());
     }
+    if (dir) dir.close();
     return false;
   }
     Serial.println("[DEBUG] Target folder opened successfully");
@@ -601,6 +594,14 @@ bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageInd
     file = dir.openNextFile();
   }
   dir.close();
+  Serial.println("[BLE DEBUG] target directory closed");
+
+  if (imageFiles.empty()) {
+    if (Serial) {
+      Serial.println("[BLE ERROR] No image files found in target folder.");
+    }
+    return false;
+  }
 
   //double check
   if (imageIndex >= imageFiles.size()) {
@@ -609,7 +610,7 @@ bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageInd
     }
     return false;
   }
-
+  Serial.println("Trying to open target folder with image specification");
   // open target, load it
   String imgPath = targetFolder+ "/" + imageFiles[imageIndex];
   File imgFile = SD.open(imgPath, FILE_READ);
@@ -631,7 +632,7 @@ bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageInd
     imgFile.close();
     return false;
   }
-
+  Serial.println("[BLE DEBUG] testing right before image buffer");
   uint8_t *imgBuf = (uint8_t *)malloc(imgSize);
   if (!imgBuf) {
     if (Serial) {
@@ -652,7 +653,7 @@ bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageInd
     free(imgBuf);
     return false;
   }
-
+  Serial.println("[BLE DEBUG] now we format");
   IDBC_ImageFormat format;
   if (!detectImageFormat(imgBuf, imgSize, &format)) {
     if (Serial) {
@@ -669,6 +670,9 @@ bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageInd
       .format = format
   };
    size_t totalChunks = calculateTotalChunks(imgSize);
+   if (Serial){
+    Serial.printf("[BLE DEBUG] expected chunk count %u, image size %u\n", totalChunks, img.size);
+   }
   //send imageInfo metapacket first so mobile knows whats up
   IDBC_DeviceToApp infoResp = IDBC_DeviceToApp_init_default;
   infoResp.which_payload = IDBC_DeviceToApp_image_info_tag;
@@ -678,8 +682,8 @@ bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageInd
   infoResp.payload.image_info.total_chunks = totalChunks;
   infoResp.payload.image_info.image_format = format;
   sendDeviceToAppResponse(&infoResp);
-
-  vTaskDelay(pdMS_TO_TICKS(15)); // Give the BLE stack a breather
+  Serial.println("[BLE DEBUG] WE SHOULD HAVE SENT YOU HOE");
+  vTaskDelay(pdMS_TO_TICKS(20)); // Give the BLE stack a breather
 
   // stream chunks
   for (uint32_t c = startChunk; c < totalChunks; c++) {
@@ -687,12 +691,15 @@ bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageInd
     if (buildImageChunk(&img, eventId, imageIndex, c, &chunk)) {
       IDBC_DeviceToApp chunkResp = IDBC_DeviceToApp_init_default;
       chunkResp.which_payload = IDBC_DeviceToApp_image_chunk_tag;
+      
+      // Assign fields directly to the image_chunk struct inside the payload union
       chunkResp.payload.image_chunk = chunk;
       sendDeviceToAppResponse(&chunkResp);
 
-      vTaskDelay(pdMS_TO_TICKS(3)); // real life needs delays for functions to work and helps explain why we need time tracking
+      vTaskDelay(pdMS_TO_TICKS(20)); // real life needs delays for functions to work
     }
   }
+  Serial.println("[BLE DEBUG] CHUNKS sent");
 
   free(imgBuf);
   return true;
@@ -706,6 +713,7 @@ String findTargetPath(unsigned long event_id) {
   bool found = false;
   if (Serial) {
     Serial.printf("[BLE Debug] pendingIncidents has %d incidents\n", pendingIncidents.size());
+    //Serial.println("[BLE DEBUG] double check max size isn't the error");
     Serial.printf("[BLE Debug] pendingIncidents has %u max size \n", pendingIncidents.max_size());
   }
   for (const auto& inc: pendingIncidents) { /// pendingIncidents possibly empty: why?
@@ -756,7 +764,7 @@ void runTransferTest(int num, bool counter){
     for (const auto& inc: pendingIncidents) {
       if (inc.eventId == num) {
         if (Serial) {
-          Serial.printf("[BLE TEST] Found image transfer Event ID");
+          Serial.printf("[BLE TEST] Found image transfer Event ID\n");
         }
         handleImageRequest(inc.folderPath, inc.eventId, 0, 0);
         break;
