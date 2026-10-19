@@ -510,3 +510,4 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+"test_images/" 
