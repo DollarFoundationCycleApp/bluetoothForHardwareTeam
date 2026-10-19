@@ -127,7 +127,7 @@ class RxCallbacks: public NimBLECharacteristicCallbacks {
         );
 
         if (pb_decode(&stream, IDBC_AppToDevice_fields, &appCmd)) {
-            handleProtobufCommand(&appCmd);
+            handleProtobufCommand(&appCmd); //Potentially overwhelming BLE
         } else {
             if (Serial) {
                 Serial.printf("Protobuf Decode Error: %s\n", PB_GET_ERROR(&stream));
@@ -358,7 +358,7 @@ void handleProtobufCommand(const IDBC_AppToDevice* appCmd) {
             Serial.printf("Proto Req: Transfer Image - Event ID: %lu, Start Img: %lu, Start Chunk: %lu\n", 
                               req.event_id, req.start_from_image, req.start_from_chunk);
           }
-          String targetFolder = findTargetPath(req.event_id);/// ISSUE HERE (event_id is possibly wrong)
+          String targetFolder = findTargetPath(req.event_id);
 
           if (targetFolder.length() == 0) {
             if (Serial) {
@@ -448,6 +448,7 @@ void handleProtobufCommand(const IDBC_AppToDevice* appCmd) {
         }
 
         case IDBC_AppToDevice_event_info_request_tag: {
+          Serial.println("[TEST] Entered EventInfoRequest handler");
           const auto& infoReq = appCmd->payload.event_info_request;
           if (Serial) {
               Serial.printf("Proto Req: Event Info for Event ID %lu\n", infoReq.event_id);
@@ -473,8 +474,14 @@ void handleProtobufCommand(const IDBC_AppToDevice* appCmd) {
                   imgCount++;
                 }
               }
+              file.close();
+              file = dir.openNextFile();
             }
             dir.close();
+          } else {
+            if (Serial) {
+              Serial.println("[SD ERROR] Failed to open event directory.");
+            }
           }
           //todo  get distance from csv 
           uint32_t distanceCM = -100; // based on distance in col 2 next to ms in col 1
@@ -554,7 +561,6 @@ void notifyPhoneOfEvent(uint32_t eventId, uint32_t distanceCm, uint32_t timeOffs
   * Helper to build a response for an image based on an event tag
 */
 bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageIndex, uint32_t startChunk) {
-  Serial.println("Before");
   if (targetFolder.length() == 0) {
     if(Serial){
       Serial.printf("[BLE ERROR] target folder for Event:%lu is invalid\n", eventId);
@@ -568,14 +574,17 @@ bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageInd
       return false;
     }
   }
+  Serial.println("[DEBUG] Before SD.open");
+  Serial.println(targetFolder);
   File dir = SD.open(targetFolder);/// ISSUE HERE
-  Serial.println("After");
+  Serial.println("[DEBUG] After SD.open");
   if (!dir || !dir.isDirectory()) {
     if (Serial) {
       Serial.printf("[SD ERROR] Failed to find or open incident folder path. %s\n", targetFolder.c_str());
     }
     return false;
   }
+    Serial.println("[DEBUG] Target folder opened successfully");
 
   std::vector<String> imageFiles; 
   // build vector
@@ -693,7 +702,7 @@ bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageInd
 * helper to find target folder
 */
 String findTargetPath(unsigned long event_id) {
-  String targetFolder = "/";
+  String targetFolder = "";
   bool found = false;
   if (Serial) {
     Serial.printf("[BLE Debug] pendingIncidents has %d incidents\n", pendingIncidents.size());
