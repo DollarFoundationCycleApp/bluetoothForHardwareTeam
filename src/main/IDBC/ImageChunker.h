@@ -12,7 +12,7 @@ extern "C" {
 #endif
 
 // Maximum number of image bytes carried by one ImageChunk.
-#define IMAGE_CHUNK_DATA_SIZE 400
+#define IMAGE_CHUNK_DATA_SIZE 200
 
 /*
  * Represents an image that has already been loaded into memory.
