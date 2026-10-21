@@ -32,6 +32,7 @@
 
 NimBLECharacteristic *pTxCharacteristic = nullptr;
 bool deviceConnected = false;
+bool deviceReady = false;
 
 Preferences preferences;
 
@@ -221,13 +222,16 @@ void initBLE() {
 
     //pHidService->start();
     pAdvertising->start();
-
+    refreshList();
     if (Serial) {
         Serial.println(F("========================================"));
         Serial.print(F("BLE Server Started: "));
         Serial.println(DEVICE_NAME);
-        Serial.println(F("Pairable directly in Phone Bluetooth Settings!"));
         Serial.println(F("========================================"));
+    }
+    deviceReady = true;
+    if (Serial) {
+      Serial.println("Device is now ready for proto");
     }
 }
 
@@ -323,7 +327,7 @@ bool sendDeviceToAppResponse(const IDBC_DeviceToApp* response) {
         return false;
     }
 
-    uint8_t buffer[1024];
+    static uint8_t buffer[1024];
     pb_ostream_t stream = pb_ostream_from_buffer(buffer, sizeof(buffer));
 
     if (!pb_encode(&stream, IDBC_DeviceToApp_fields, response)) {
@@ -334,15 +338,28 @@ bool sendDeviceToAppResponse(const IDBC_DeviceToApp* response) {
     }
 
     pTxCharacteristic->setValue(buffer, stream.bytes_written);
+    if (deviceConnected) {
     pTxCharacteristic->notify();
     Serial.println("[BLE DEBUG] SENT");
     return true;
+    } else {
+      if (Serial) {
+        Serial.println("We lost connection so we didn't notify on pTX channel");
+      }
+      return false;
+    }
 }
 
 /**
  * Processes incoming protobuf AppToDevice requests.
  */
 void handleProtobufCommand(const IDBC_AppToDevice* appCmd) {
+    if (!deviceReady) {
+      if(Serial) {
+        Serial.println("[CRITICAL ERROR CAUGHT] Device was not ready to recieve protobuf commands");
+      }
+      return;
+    }
     switch (appCmd->which_payload) {
         case IDBC_AppToDevice_image_transfer_request_tag: {
           const auto& req = appCmd->payload.image_transfer_request;
@@ -418,13 +435,13 @@ void handleProtobufCommand(const IDBC_AppToDevice* appCmd) {
           // Populate the static array defined in the nanopb header (max 16 entries)
           resp.payload.pending_event_list.event_ids_count = 0;
           for (const auto& inc : pendingIncidents) {
-            if (resp.payload.pending_event_list.event_ids_count < 16) {
+            if (resp.payload.pending_event_list.event_ids_count < 8) {
               uint32_t idx = resp.payload.pending_event_list.event_ids_count;
               resp.payload.pending_event_list.event_ids[idx] = inc.eventId;
               resp.payload.pending_event_list.event_ids_count++;
             } else {
               if (Serial) {
-                  Serial.println("[BLE WARNING] Pending event list truncated; exceeded max array size of 16.");
+                  Serial.println("[BLE WARNING] Pending event list truncated; exceeded max array size of 8.");
               }
               break;
             }
@@ -568,6 +585,7 @@ bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageInd
   }
   Serial.println("[DEBUG] Before SD.open");
   Serial.println("Target folder: " + targetFolder);
+  targetFolder.replace("//", "/");
   File dir = SD.open(targetFolder);/// ISSUE HERE
   Serial.println("[DEBUG] After SD.open");
   if (!dir || !dir.isDirectory()) {
@@ -575,7 +593,11 @@ bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageInd
       Serial.printf("[SD ERROR] Failed to find or open incident folder path. %s\n", targetFolder.c_str());
     }
     if (dir) dir.close();
-    return false;
+     dir = SD.open("/" + targetFolder);
+     if(!dir || !dir.isDirectory()) {
+      if (dir) dir.close();
+      return false;
+     }
   }
     Serial.println("[DEBUG] Target folder opened successfully");
 
@@ -633,7 +655,17 @@ bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageInd
     return false;
   }
   Serial.println("[BLE DEBUG] testing right before image buffer");
-  uint8_t *imgBuf = (uint8_t *)malloc(imgSize);
+
+  uint8_t *imgBuf = nullptr;
+  if (psramFound()) {
+      imgBuf = (uint8_t *)heap_caps_malloc(imgSize, MALLOC_CAP_SPIRAM);
+  }
+  
+  // Fall back to regular internal DRAM if PSRAM allocation didn't work
+  if (!imgBuf) {
+      imgBuf = (uint8_t *)malloc(imgSize);
+  } //todo jacob do we actually need to have a malloc here?
+
   if (!imgBuf) {
     if (Serial) {
       Serial.println("[BLE ERROR] Malloc failed! Not enough heap for this Image Buffer");
@@ -682,8 +714,8 @@ bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageInd
   infoResp.payload.image_info.total_chunks = totalChunks;
   infoResp.payload.image_info.image_format = format;
   sendDeviceToAppResponse(&infoResp);
-  Serial.println("[BLE DEBUG] WE SHOULD HAVE SENT YOU HOE");
-  vTaskDelay(pdMS_TO_TICKS(20)); // Give the BLE stack a breather
+  Serial.println("[BLE DEBUG] WE SHOULD HAVE SENT");
+  vTaskDelay(pdMS_TO_TICKS(40)); // Give the BLE stack a breather
 
   // stream chunks
   for (uint32_t c = startChunk; c < totalChunks; c++) {
@@ -696,7 +728,7 @@ bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageInd
       chunkResp.payload.image_chunk = chunk;
       sendDeviceToAppResponse(&chunkResp);
 
-      vTaskDelay(pdMS_TO_TICKS(20)); // real life needs delays for functions to work
+      vTaskDelay(pdMS_TO_TICKS(40)); // real life needs delays for functions to work
     }
   }
   Serial.println("[BLE DEBUG] CHUNKS sent");
@@ -743,7 +775,7 @@ String findTargetPath(unsigned long event_id) {
 * Test method to help run transfer acknowledgments
 */ 
 void runTransferTest(int num, bool counter){
-  refreshList();
+  //refreshList();
   if (counter) {
     int count = 0;
     if (Serial) {

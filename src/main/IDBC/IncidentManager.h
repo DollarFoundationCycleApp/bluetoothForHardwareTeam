@@ -18,5 +18,6 @@ extern std::vector<IncidentMetadata> pendingIncidents;
 // 3. Declare helper prototypes so other files know they exist
 void queueIncidentFolders(const char* baseFolderPath);
 bool removeDirRecursive(fs::FS &fs, const char *path);
+void refreshList();
 
 #endif

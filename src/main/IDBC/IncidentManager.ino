@@ -27,6 +27,7 @@ void queueIncidentFolders(const char* baseFolderPath) {
             if (dirName.startsWith("incident")) { 
               bool alreadyExists = false;
               String fullPath = String(baseFolderPath) + "/" + dirName;
+              fullPath.replace("//", "/");
               String incidentNumStr = dirName.substring(8);
               uint32_t eventId = strtoul(incidentNumStr.c_str(), NULL, 10);
 
@@ -91,9 +92,9 @@ void refreshList() {
   if(!pendingIncidents.empty()){
     pendingIncidents.clear();
   }
-  queueIncidentFolders("/");
+  queueIncidentFolders("");
   if(pendingIncidents.empty()){ // attempting a new path to get it. Depends on SD for various ways that can work
-    queueIncidentFolders("");
+    queueIncidentFolders("/");
   }
   if(pendingIncidents.empty()) {
     queueIncidentFolders("./");
