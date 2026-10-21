@@ -13,6 +13,7 @@ std::vector<IncidentMetadata> pendingIncidents;
 */
 void queueIncidentFolders(const char* baseFolderPath) {
     File root = SD.open(baseFolderPath);
+    yield();
     if (!root || !root.isDirectory()) {
         if (Serial){
           Serial.println("Failed to open base folder for scanning.");
@@ -21,6 +22,7 @@ void queueIncidentFolders(const char* baseFolderPath) {
     }
 
     File entry = root.openNextFile();
+    yield();
     while (entry) {
         if (entry.isDirectory()) {
             String dirName = String(entry.name());
@@ -51,6 +53,7 @@ void queueIncidentFolders(const char* baseFolderPath) {
             }
         }
         entry.close();
+        yield();
         entry = root.openNextFile();
     }
     root.close();
@@ -92,10 +95,13 @@ void refreshList() {
   if(!pendingIncidents.empty()){
     pendingIncidents.clear();
   }
-  queueIncidentFolders("");
+  yield();
+  queueIncidentFolders("/");
+  yield();
   if(pendingIncidents.empty()){ // attempting a new path to get it. Depends on SD for various ways that can work
-    queueIncidentFolders("/");
+    queueIncidentFolders("");
   }
+  yield();
   if(pendingIncidents.empty()) {
     queueIncidentFolders("./");
   }

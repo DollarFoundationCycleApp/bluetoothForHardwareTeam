@@ -245,6 +245,7 @@ void folderInitialization() {
     int folderNumber = atoi(&folderPath[13]);
     folderNumber++;
     sprintf(&folderPath[13], "%d", folderNumber);
+    yield();
   }
   SD.mkdir(folderPath);
 }
@@ -674,13 +675,13 @@ void loop() {
   digitalWrite(trigPin, LOW);
 
   // Reads the echoPin, returns the sound wave travel time in microseconds
-  duration = pulseIn(echoPin, HIGH); // RH: pulseIn has a timeout, which can be optimized / reduced; e.g.
+  duration = pulseIn(echoPin, HIGH, 500000); // RH: pulseIn has a timeout, which can be optimized / reduced; e.g.
 
   // Calculate the distance in inches
   distanceInch = CM_TO_INCH * duration * SOUND_SPEED/2;
 
   // Prints the distance in the Serial Monitor
-  Serial.println(distanceInch);
+  //Serial.println(distanceInch); //todo uncomment later
 
   // Feed detector (may trigger on_chunk_start or on_detection callbacks)
   detector_update(millis(), distanceInch);

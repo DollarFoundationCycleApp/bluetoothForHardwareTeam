@@ -107,5 +107,4 @@ message AppTimeRequest {}
 message AppTimeResponse {
   uint32 hours = 1;
   uint32 minute = 2;
-  uint32 seconds = 3; 
 }

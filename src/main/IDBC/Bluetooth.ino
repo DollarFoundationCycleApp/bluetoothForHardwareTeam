@@ -231,7 +231,7 @@ void initBLE() {
     }
     deviceReady = true;
     if (Serial) {
-      Serial.println("Device is now ready for proto");
+      Serial.println("Device is now ready for proto?");
     }
 }
 
@@ -441,7 +441,7 @@ void handleProtobufCommand(const IDBC_AppToDevice* appCmd) {
               resp.payload.pending_event_list.event_ids_count++;
             } else {
               if (Serial) {
-                  Serial.println("[BLE WARNING] Pending event list truncated; exceeded max array size of 8.");
+                  Serial.println("[BLE WARNING] Pending event list truncated; exceeded max array size of 16.");
               }
               break;
             }
@@ -570,12 +570,14 @@ void notifyPhoneOfEvent(uint32_t eventId, uint32_t distanceCm, uint32_t timeOffs
   * Helper to build a response for an image based on an event tag
 */
 bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageIndex, uint32_t startChunk) {
+  targetFolder.trim();
   if (targetFolder.length() == 0) {
     if(Serial){
       Serial.printf("[BLE ERROR] target folder for Event:%lu is invalid\n", eventId);
     }
     refreshList();
     targetFolder = findTargetPath((unsigned long)eventId);
+    targetFolder.trim();
     if (targetFolder.length() == 0) {
       if(Serial){
         Serial.println("[BLE Error] Attempted refresh failed.");
@@ -634,106 +636,66 @@ bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageInd
   }
   Serial.println("Trying to open target folder with image specification");
   // open target, load it
-  String imgPath = targetFolder+ "/" + imageFiles[imageIndex];
+  
+  String imgPath = targetFolder + "/" + imageFiles[imageIndex];
   File imgFile = SD.open(imgPath, FILE_READ);
-  if (!imgFile) {
-    if (Serial) {
-      Serial.println("[SD ERROR] Failed to open target image file for reading.");
-      return false;
-    }
-  }
+  if (!imgFile) return false;
   
   size_t imgSize = imgFile.size();
-
-  // Verify that image file is not empty
-  if(imgSize == 0) {
-    if (Serial) {
-      Serial.println("[BLE ERROR] Image file is empty.");
-    }
-
+  if (imgSize == 0) {
     imgFile.close();
     return false;
   }
-  Serial.println("[BLE DEBUG] testing right before image buffer");
 
-  uint8_t *imgBuf = nullptr;
-  if (psramFound()) {
-      imgBuf = (uint8_t *)heap_caps_malloc(imgSize, MALLOC_CAP_SPIRAM);
-  }
-  
-  // Fall back to regular internal DRAM if PSRAM allocation didn't work
-  if (!imgBuf) {
-      imgBuf = (uint8_t *)malloc(imgSize);
-  } //todo jacob do we actually need to have a malloc here?
-
-  if (!imgBuf) {
-    if (Serial) {
-      Serial.println("[BLE ERROR] Malloc failed! Not enough heap for this Image Buffer");
-      imgFile.close();
-      return false;
-    }
-  }
-  size_t bytesRead = imgFile.read(imgBuf, imgSize);
-  imgFile.close();
-
-  // Verify that all bytes for the image were successfully read
-  if (bytesRead != imgSize) {
-    if (Serial) {
-      Serial.println("[BLE ERROR] Failed to read the complete image.");
-    }
-
-    free(imgBuf);
-    return false;
-  }
-  Serial.println("[BLE DEBUG] now we format");
+  // 1. Read just the header bytes to detect format (first 16 bytes are plenty)
+  uint8_t header[16];
+  size_t headerLen = imgFile.read(header, sizeof(header));
   IDBC_ImageFormat format;
-  if (!detectImageFormat(imgBuf, imgSize, &format)) {
-    if (Serial) {
-      Serial.println("[BLE ERROR] Unsupported or invalid image format.");
-    }
-
-    free(imgBuf);
+  if (!detectImageFormat(header, headerLen, &format)) {
+    imgFile.close();
     return false;
   }
 
-  ImageData img = {
-      .data = imgBuf,
-      .size = imgSize,
-      .format = format
-  };
-   size_t totalChunks = calculateTotalChunks(imgSize);
-   if (Serial){
-    Serial.printf("[BLE DEBUG] expected chunk count %u, image size %u\n", totalChunks, img.size);
-   }
-  //send imageInfo metapacket first so mobile knows whats up
+  size_t totalChunks = calculateTotalChunks(imgSize);
+
+  // Send image info meta-packet first
   IDBC_DeviceToApp infoResp = IDBC_DeviceToApp_init_default;
   infoResp.which_payload = IDBC_DeviceToApp_image_info_tag;
   infoResp.payload.image_info.event_id = eventId;
-  infoResp.payload.image_info.image_index = imageIndex; // Scoped parameter
+  infoResp.payload.image_info.image_index = imageIndex;
   infoResp.payload.image_info.image_size_bytes = imgSize;
   infoResp.payload.image_info.total_chunks = totalChunks;
   infoResp.payload.image_info.image_format = format;
   sendDeviceToAppResponse(&infoResp);
-  Serial.println("[BLE DEBUG] WE SHOULD HAVE SENT");
-  vTaskDelay(pdMS_TO_TICKS(40)); // Give the BLE stack a breather
+  vTaskDelay(pdMS_TO_TICKS(40));
 
-  // stream chunks
+  // 2. Stream chunks directly from the file without ever using malloc!
   for (uint32_t c = startChunk; c < totalChunks; c++) {
-    IDBC_ImageChunk chunk;
-    if (buildImageChunk(&img, eventId, imageIndex, c, &chunk)) {
-      IDBC_DeviceToApp chunkResp = IDBC_DeviceToApp_init_default;
-      chunkResp.which_payload = IDBC_DeviceToApp_image_chunk_tag;
-      
-      // Assign fields directly to the image_chunk struct inside the payload union
-      chunkResp.payload.image_chunk = chunk;
-      sendDeviceToAppResponse(&chunkResp);
+    size_t offset = (size_t)c * IMAGE_CHUNK_DATA_SIZE;
+    size_t remaining = imgSize - offset;
+    size_t bytesToCopy = (remaining > IMAGE_CHUNK_DATA_SIZE) ? IMAGE_CHUNK_DATA_SIZE : remaining;
 
-      vTaskDelay(pdMS_TO_TICKS(40)); // real life needs delays for functions to work
-    }
+    imgFile.seek(offset);
+
+    IDBC_ImageChunk chunk = IDBC_ImageChunk_init_default;
+    chunk.event_id = eventId;
+    chunk.image_index = imageIndex;
+    chunk.chunk_sequence = c;
+    chunk.total_chunks = (uint32_t)totalChunks;
+    chunk.is_last_chunk = (c == totalChunks - 1);
+    chunk.payload.size = (pb_size_t)bytesToCopy;
+    
+    imgFile.read(chunk.payload.bytes, bytesToCopy);
+
+    IDBC_DeviceToApp chunkResp = IDBC_DeviceToApp_init_default;
+    chunkResp.which_payload = IDBC_DeviceToApp_image_chunk_tag;
+    chunkResp.payload.image_chunk = chunk;
+    
+    sendDeviceToAppResponse(&chunkResp);
+    vTaskDelay(pdMS_TO_TICKS(40));
   }
-  Serial.println("[BLE DEBUG] CHUNKS sent");
 
-  free(imgBuf);
+  imgFile.close();
   return true;
 }
 
