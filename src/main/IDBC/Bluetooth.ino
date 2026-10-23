@@ -6,6 +6,7 @@
 #include "esp_bt.h"
 #include "ImageChunker.h" 
 #include "IncidentManager.h"
+#include <freertos/semphr.h>
 
 // --- Nanopb Includes ---
 #include <pb_decode.h>
@@ -28,7 +29,6 @@
 #define MAC_STR_LEN       18 // Fixed length for "XX:XX:XX:XX:XX:XX"
 #define DEVICE_NAME       "Bike_CAM"
 
-//extern std::vector<IncidentMetadata> pendingIncidents;
 
 NimBLECharacteristic *pTxCharacteristic = nullptr;
 bool deviceConnected = false;
@@ -38,6 +38,8 @@ Preferences preferences;
 
 char recentDevices[MAX_SAVED_DEVICES][MAC_STR_LEN]; 
 int savedDeviceCount = 0;
+
+SemaphoreHandle_t incidentMutex = nullptr;
 
 // Function Prototypes
 void loadSavedDevices();
@@ -128,111 +130,122 @@ class RxCallbacks: public NimBLECharacteristicCallbacks {
     }
 };
 
+struct PendingImageRequest {
+    bool active;
+    uint32_t eventId;
+    uint32_t startImage;
+    uint32_t startChunk;
+    char targetFolder[64];
+};
+
+static PendingImageRequest pendingImageReq = { .active = false };
+
 void initBLE() {
-    // Release Classic BT memory footprint back to system heap
-    esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
+  incidentMutex = xSemaphoreCreateMutex();
+  // Release Classic BT memory footprint back to system heap
+  esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
 
-    loadSavedDevices();
-    printSavedDevices();
+  loadSavedDevices();
+  printSavedDevices();
 
-    // Initialize NimBLE Stack
-    NimBLEDevice::init(DEVICE_NAME);
+  // Initialize NimBLE Stack
+  NimBLEDevice::init(DEVICE_NAME);
 
-    // Configure Security Capabilities for Native OS HID Pairing
-    NimBLEDevice::setSecurityAuth(true, false, true); 
-    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT); 
+  // Configure Security Capabilities for Native OS HID Pairing
+  NimBLEDevice::setSecurityAuth(true, false, true); 
+  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT); 
 
-    NimBLEDevice::setPower(7);
+  NimBLEDevice::setPower(7);
 
-    NimBLEServer *pServer = NimBLEDevice::createServer();
-    pServer->setCallbacks(new MyServerCallbacks());
+  NimBLEServer *pServer = NimBLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
 
-    // Service 1: Standard HID Keyboard Service
-    NimBLEService *pHidService = pServer->createService(HID_SERVICE_UUID);
+  // Service 1: Standard HID Keyboard Service
+  NimBLEService *pHidService = pServer->createService(HID_SERVICE_UUID);
 
-    NimBLECharacteristic *pHidInfo = pHidService->createCharacteristic(
-                                        HID_INFORMATION_UUID,
+  NimBLECharacteristic *pHidInfo = pHidService->createCharacteristic(
+                                      HID_INFORMATION_UUID,
+                                      NIMBLE_PROPERTY::READ_ENC
+                                   );
+  const uint8_t hidInfoVal[] = {0x11, 0x01, 0x00, 0x02};
+  pHidInfo->setValue(hidInfoVal, sizeof(hidInfoVal));
+
+  NimBLECharacteristic *pReportMap = pHidService->createCharacteristic(
+                                        HID_REPORT_MAP_UUID,
                                         NIMBLE_PROPERTY::READ_ENC
                                      );
-    const uint8_t hidInfoVal[] = {0x11, 0x01, 0x00, 0x02};
-    pHidInfo->setValue(hidInfoVal, sizeof(hidInfoVal));
+  pReportMap->setValue(hidReportDescriptor, sizeof(hidReportDescriptor));
 
-    NimBLECharacteristic *pReportMap = pHidService->createCharacteristic(
-                                          HID_REPORT_MAP_UUID,
-                                          NIMBLE_PROPERTY::READ_ENC
-                                       );
-    pReportMap->setValue(hidReportDescriptor, sizeof(hidReportDescriptor));
-
-    NimBLECharacteristic *pProtocolMode = pHidService->createCharacteristic(
-                                             PROTOCOL_MODE_UUID,
-                                             NIMBLE_PROPERTY::READ_ENC | NIMBLE_PROPERTY::WRITE_NR
-                                          );
-    // NimBLECharacteristic *pCtrl = pHidService->createCharacteristic(
-    //                                (uint16_t)0x2A4C, NIMBLE_PROPERTY::WRITE_NR);
+  NimBLECharacteristic *pProtocolMode = pHidService->createCharacteristic(
+                                           PROTOCOL_MODE_UUID,
+                                           NIMBLE_PROPERTY::READ_ENC | NIMBLE_PROPERTY::WRITE_NR
+                                        );
+  // NimBLECharacteristic *pCtrl = pHidService->createCharacteristic(
+  //                                (uint16_t)0x2A4C, NIMBLE_PROPERTY::WRITE_NR);
     
-    NimBLECharacteristic *pInput = pHidService->createCharacteristic(
-                                    (uint16_t)0x2A4D,
-                                    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::READ_ENC | NIMBLE_PROPERTY::WRITE_NR);
+  NimBLECharacteristic *pInput = pHidService->createCharacteristic(
+                                  (uint16_t)0x2A4D,
+                                  NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::READ_ENC | NIMBLE_PROPERTY::WRITE_NR);
 
-    NimBLEDescriptor *pRef = pInput->createDescriptor(
-                                    (uint16_t)0x2908,
-                                    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::READ_ENC );
-    uint8_t refVal[] = {0x01, 0x01};
-    pRef->setValue(refVal, 2);
+  NimBLEDescriptor *pRef = pInput->createDescriptor(
+                                  (uint16_t)0x2908,
+                                  NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::READ_ENC );
+  uint8_t refVal[] = {0x01, 0x01};
+  pRef->setValue(refVal, 2);
 
-    uint8_t mode = 0x01;
-    pProtocolMode->setValue(&mode, 1);
+  uint8_t mode = 0x01;
+  pProtocolMode->setValue(&mode, 1);
 
-    // Service 2: Custom Service (For Protobuf / File / Data Transfer)
-    NimBLEService *pDataService = pServer->createService(SERVICE_UUID_DATA);
+  // Service 2: Custom Service (For Protobuf / File / Data Transfer)
+  NimBLEService *pDataService = pServer->createService(SERVICE_UUID_DATA);
 
-    pTxCharacteristic = pDataService->createCharacteristic(
-                                 CHARACTERISTIC_UUID_TX,
-                                 NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::READ
-                               );
+  pTxCharacteristic = pDataService->createCharacteristic(
+                               CHARACTERISTIC_UUID_TX,
+                               NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::READ
+                             );
 
-    NimBLECharacteristic *pRxCharacteristic = pDataService->createCharacteristic(
-                                               CHARACTERISTIC_UUID_RX,
-                                               NIMBLE_PROPERTY::WRITE_ENC | NIMBLE_PROPERTY::WRITE_NR
-                                             );
-    pRxCharacteristic->setCallbacks(new RxCallbacks());
+  NimBLECharacteristic *pRxCharacteristic = pDataService->createCharacteristic(
+                                             CHARACTERISTIC_UUID_RX,
+                                             NIMBLE_PROPERTY::WRITE_ENC | NIMBLE_PROPERTY::WRITE_NR
+                                           );
+  pRxCharacteristic->setCallbacks(new RxCallbacks());
 
-    // Service 3: Advertising Configuration
-    NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
-    pAdvertising->setName(DEVICE_NAME);
-    pAdvertising->setAppearance(0x03C1); // Standard Keyboard Icon
-    pAdvertising->setName(DEVICE_NAME);
-    pAdvertising->addServiceUUID(SERVICE_UUID_DATA); // Put data service first
-    pAdvertising->enableScanResponse(true);
+  // Service 3: Advertising Configuration
+  NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
+  pAdvertising->setName(DEVICE_NAME);
+  pAdvertising->setAppearance(0x03C1); // Standard Keyboard Icon
+  pAdvertising->setName(DEVICE_NAME);
+  pAdvertising->addServiceUUID(SERVICE_UUID_DATA); // Put data service first
+  pAdvertising->enableScanResponse(true);
 
-    if (savedDeviceCount > 0 && strlen(recentDevices[0]) > 0) {
-        NimBLEAddress targetAddr(std::string(recentDevices[0]), BLE_ADDR_PUBLIC);
-        if (Serial) {
-            Serial.print(F(">>> Attempting Direct Auto-Reconnect to Last Device: "));
-            Serial.println(recentDevices[0]);
-        }
-
-        NimBLEDevice::whiteListAdd(targetAddr);
-        pAdvertising->setScanFilter(false, false);
-    } else {
-        if (Serial) {
-            Serial.println(F(">>> No saved devices. Advertising for new pairing..."));
-        }
-    }
-
-    //pHidService->start();
-    pAdvertising->start();
-    refreshList();
+  if (savedDeviceCount > 0 && strlen(recentDevices[0]) > 0) {
+    NimBLEAddress targetAddr(std::string(recentDevices[0]), BLE_ADDR_PUBLIC);
     if (Serial) {
-        Serial.println(F("========================================"));
-        Serial.print(F("BLE Server Started: "));
-        Serial.println(DEVICE_NAME);
-        Serial.println(F("========================================"));
+      Serial.print(F(">>> Attempting Direct Auto-Reconnect to Last Device: "));
+      Serial.println(recentDevices[0]);
     }
-    deviceReady = true;
+
+    NimBLEDevice::whiteListAdd(targetAddr);
+    pAdvertising->setScanFilter(false, false);
+  } else {
     if (Serial) {
-      Serial.println("Device is now ready for proto?");
+      Serial.println(F(">>> No saved devices. Advertising for new pairing..."));
     }
+  }
+
+  //pHidService->start();
+  pAdvertising->start();
+  refreshList();
+  if (Serial) {
+    Serial.println(F("========================================"));
+    Serial.print(F("BLE Server Started: "));
+    Serial.println(DEVICE_NAME);
+    Serial.println(F("========================================"));
+  }
+  deviceReady = true;
+  if (Serial) {
+    Serial.println("Device is now ready for proto?");
+  }
 }
 
 /**
@@ -340,6 +353,7 @@ bool sendDeviceToAppResponse(const IDBC_DeviceToApp* response) {
     pTxCharacteristic->setValue(buffer, stream.bytes_written);
     if (deviceConnected) {
     pTxCharacteristic->notify();
+    vTaskDelay(pdMS_TO_TICKS(10)); // Allow BLE stack ring buffer to clear out
     Serial.println("[BLE DEBUG] SENT");
     return true;
     } else {
@@ -361,64 +375,79 @@ void handleProtobufCommand(const IDBC_AppToDevice* appCmd) {
       return;
     }
     switch (appCmd->which_payload) {
-        case IDBC_AppToDevice_image_transfer_request_tag: {
-          const auto& req = appCmd->payload.image_transfer_request;
-          if (Serial) {
-            Serial.printf("Proto Req: Transfer Image - Event ID: %lu, Start Img: %lu, Start Chunk: %lu\n", 
-                              req.event_id, req.start_from_image, req.start_from_chunk);
-          }
-          String targetFolder = findTargetPath(req.event_id);
+      case IDBC_AppToDevice_image_transfer_request_tag: {
+        const auto& req = appCmd->payload.image_transfer_request;
+        if (Serial) {
+          Serial.printf("Proto Req: Transfer Image - Event ID: %lu, Start Img: %lu, Start Chunk: %lu\n", 
+                            req.event_id, req.start_from_image, req.start_from_chunk);
+        }
+        String targetFolder = findTargetPath(req.event_id);
 
-          if (targetFolder.length() == 0) {
-            if (Serial) {
-              Serial.println("[BLE Error] failed to find target folder");
-            }
-            break;
+        if (targetFolder.length() == 0) {
+          if (Serial) {
+            Serial.println("[BLE Error] failed to find target folder");
           }
-          bool success = handleImageRequest(targetFolder, req.event_id, req.start_from_image, req.start_from_chunk);
-          if (!success) {
-            if (Serial) {
-              Serial.println("[BLE Error] failed to handleImageRequest for Proto");
-            }
-          }  
           break;
+        }
+
+        // DEFER EXECUTION: Store request parameters safely instead of running SD here
+        pendingImageReq.active = true;
+        pendingImageReq.eventId = req.event_id;
+        pendingImageReq.startImage = req.start_from_image;
+        pendingImageReq.startChunk = req.start_from_chunk;
+        snprintf(pendingImageReq.targetFolder, sizeof(pendingImageReq.targetFolder), "%s", targetFolder.c_str());
+
+        if (Serial) {
+          Serial.println("[BLE] Image request deferred to main loop.");
+        }
+        break;
       }
 
-        case IDBC_AppToDevice_event_transfer_ack_tag: {
-          const auto& ack = appCmd->payload.event_transfer_ack;
+      const auto& ack = appCmd->payload.event_transfer_ack;
           if (Serial) {
-              Serial.printf("[BLE] Got ACK from phone for Event ID %lu. Processing cleanup...\n", ack.event_id);
+              Serial.printf("[BLE] Got ACK from phone for Event ID %lu. Preparing safe cleanup...\n", ack.event_id);
           }
             
           bool foundAndCleaned = false;
             
-          // Search vector for the acknowledged event ID
-          for (auto it = pendingIncidents.begin(); it != pendingIncidents.end(); ++it) {
-            if (it->eventId == ack.event_id) {
-              String folderPathToClean = it->folderPath;
+          if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            for (auto it = pendingIncidents.begin(); it != pendingIncidents.end(); ++it) {
+              if (it->eventId == ack.event_id) {
+                String folderPathToClean = it->folderPath;
                     
-              // Remove from tracking vector first
-              pendingIncidents.erase(it);
+                // Remove from tracking vector so no new requests look for it
+                pendingIncidents.erase(it);
+                // Give the driver a brief moment to close any trailing file descriptors
+                vTaskDelay(pdMS_TO_TICKS(50));
+                xSemaphoreGive(incidentMutex); 
+                // Attempt recursive wipe with retry logic
+                bool deleted = false;
+                for (int attempt = 0; attempt < 3 && !deleted; attempt++) {
+                  if (attempt > 0) vTaskDelay(pdMS_TO_TICKS(100));
+                  deleted = removeDirRecursive(SD, folderPathToClean.c_str());
+                }
+
+                if (deleted) {
+                  if (Serial) {
+                    Serial.printf("[SD] Successfully wiped acknowledged directory: %s\n", folderPathToClean.c_str());
+                  }
+                } else {
+                  if (Serial) {
+                    Serial.println("[SD ERROR] Failed to delete folder. Files may still be active or locked.");
+                  }
+                }
                     
-              // Recursively nuke the folder and all its contents off the SD card
-              if (removeDirRecursive(SD, folderPathToClean.c_str())) {
-                if(Serial) {
-                  Serial.printf("[SD] Successfully wiped acknowledged directory: %s\n", folderPathToClean.c_str());
-                }
-              } else {
-                if(Serial) {
-                  Serial.println("[SD ERROR] Failed to delete folder from SD card. Check if files are locked.");
-                }
+                foundAndCleaned = true;
+                break;
               }
-                    
-              foundAndCleaned = true;
-              break;
             }
+            // If mutex wasn't unlocked inside the loop because item wasn't found:
+            // (Handled cleanly above by releasing right after erase)
           }
 
           if (!foundAndCleaned) {
-            if(Serial) {
-              Serial.printf("[BLE WARNING] Received ACK for Event ID %lu, but it wasn't found in the pending vector.\n", ack.event_id);
+            if (Serial) {
+              Serial.printf("[BLE WARNING] Received ACK for Event ID %lu, but it wasn't found in vector.\n", ack.event_id);
             }
           }
           break;
@@ -434,17 +463,20 @@ void handleProtobufCommand(const IDBC_AppToDevice* appCmd) {
 
           // Populate the static array defined in the nanopb header (max 16 entries)
           resp.payload.pending_event_list.event_ids_count = 0;
-          for (const auto& inc : pendingIncidents) {
-            if (resp.payload.pending_event_list.event_ids_count < 8) {
-              uint32_t idx = resp.payload.pending_event_list.event_ids_count;
-              resp.payload.pending_event_list.event_ids[idx] = inc.eventId;
-              resp.payload.pending_event_list.event_ids_count++;
-            } else {
-              if (Serial) {
-                  Serial.println("[BLE WARNING] Pending event list truncated; exceeded max array size of 16.");
+          if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            for (const auto& inc : pendingIncidents) {
+              if (resp.payload.pending_event_list.event_ids_count < 8) {
+                uint32_t idx = resp.payload.pending_event_list.event_ids_count;
+                resp.payload.pending_event_list.event_ids[idx] = inc.eventId;
+                resp.payload.pending_event_list.event_ids_count++;
+              } else {
+                if (Serial) {
+                    Serial.println("[BLE WARNING] Pending event list truncated; exceeded max array size of 16.");
+                }
+                break;
               }
-              break;
             }
+            xSemaphoreGive(incidentMutex);
           }
 
           if (Serial) {
@@ -471,8 +503,9 @@ void handleProtobufCommand(const IDBC_AppToDevice* appCmd) {
             }
             break;
           }
-          
+          vTaskDelay(pdMS_TO_TICKS(10));
           File dir = SD.open(targetFolder);
+          vTaskDelay(pdMS_TO_TICKS(10));
           uint32_t imgCount = 0;
           if (dir && dir.isDirectory()) {
             File file = dir.openNextFile();
@@ -595,12 +628,12 @@ bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageInd
       Serial.printf("[SD ERROR] Failed to find or open incident folder path. %s\n", targetFolder.c_str());
     }
     if (dir) dir.close();
-     dir = SD.open("/" + targetFolder);
-     if(!dir || !dir.isDirectory()) {
-      if (dir) dir.close();
-      return false;
-     }
-  }
+      dir = SD.open("/" + targetFolder);
+      if(!dir || !dir.isDirectory()) {
+        if (dir) dir.close();
+        return false;
+      }
+    }
     Serial.println("[DEBUG] Target folder opened successfully");
 
   std::vector<String> imageFiles; 
@@ -692,9 +725,11 @@ bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageInd
     chunkResp.payload.image_chunk = chunk;
     
     sendDeviceToAppResponse(&chunkResp);
-    vTaskDelay(pdMS_TO_TICKS(40));
+    vTaskDelay(pdMS_TO_TICKS(80));
   }
-
+  if (Serial) {
+    Serial.println("[BLE DEBUG] Chunks have been sent.");
+  }
   imgFile.close();
   return true;
 }
@@ -708,61 +743,92 @@ String findTargetPath(unsigned long event_id) {
   if (Serial) {
     Serial.printf("[BLE Debug] pendingIncidents has %d incidents\n", pendingIncidents.size());
     //Serial.println("[BLE DEBUG] double check max size isn't the error");
-    Serial.printf("[BLE Debug] pendingIncidents has %u max size \n", pendingIncidents.max_size());
   }
-  for (const auto& inc: pendingIncidents) { /// pendingIncidents possibly empty: why?
-    if (inc.eventId == event_id) {
-      targetFolder = inc.folderPath;
-      found = true;
-      break;
-    }
-  }
-  if (!found) {
-    refreshList();
+  if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
     for (const auto& inc: pendingIncidents) { /// pendingIncidents possibly empty: why?
       if (inc.eventId == event_id) {
         targetFolder = inc.folderPath;
-        if (Serial) {
-          Serial.println("Found the target folder");
-        }
         found = true;
         break;
       }
     }
+    if (!found) { /*
+      refreshList();
+      for (const auto& inc: pendingIncidents) { /// pendingIncidents possibly empty: why?
+        if (inc.eventId == event_id) {
+          targetFolder = inc.folderPath;
+          if (Serial) {
+            Serial.println("Found the target folder");
+          }
+          found = true;
+          break;
+        }
+      }// */
+    } 
+    xSemaphoreGive(incidentMutex);
   }
   return targetFolder;
+}
+
+void handlePendingBluetoothTasks() {
+  if (!pendingImageReq.active) return;
+
+  // Copy parameters locally and clear active flag immediately
+  uint32_t eventId = pendingImageReq.eventId;
+  uint32_t startImg = pendingImageReq.startImage;
+  uint32_t startChunk = pendingImageReq.startChunk;
+  String folder = String(pendingImageReq.targetFolder);
+  
+  pendingImageReq.active = false;
+
+  if (Serial) {
+    Serial.println("[LOOP] Processing deferred image transfer request...");
+  }
+
+  // Now runs safely on the main loopTask stack (which has plenty of headroom)
+  bool success = handleImageRequest(folder, eventId, startImg, startChunk);
+  if (!success && Serial) {
+    Serial.println("[LOOP Error] Failed to complete deferred image transfer.");
+  }
+  vTaskDelay(pdMS_TO_TICKS(50));
 }
 
 /** 
 * Test method to help run transfer acknowledgments
 */ 
 void runTransferTest(int num, bool counter){
-  //refreshList();
+  refreshList();
   if (counter) {
     int count = 0;
     if (Serial) {
       Serial.printf("[BLE TEST] Running transfer test for %d incidents...\n", num);
     }
-    for(const auto& inc: pendingIncidents){
-      if (count >= num) {break;}
-      if (Serial) {
-        Serial.printf("[BLE TEST] Sending image transfer response for Event ID %lu, Folder: %s\n", inc.eventId, inc.folderPath.c_str());
+    if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+      for(const auto& inc: pendingIncidents){
+        if (count >= num) {break;}
+        if (Serial) {
+          Serial.printf("[BLE TEST] Sending image transfer response for Event ID %lu, Folder: %s\n", inc.eventId, inc.folderPath.c_str());
+        }
+        handleImageRequest(inc.folderPath, inc.eventId, 0, 0);
+        count++;
       }
-      handleImageRequest(inc.folderPath, inc.eventId, 0, 0);
-      count++;
+      xSemaphoreGive(incidentMutex);
     }
   } else {
     if (Serial) {
       Serial.printf("[BLE TEST] Running transfer test for incident num %d...\n", num);
     }
-    for (const auto& inc: pendingIncidents) {
-      if (inc.eventId == num) {
-        if (Serial) {
-          Serial.printf("[BLE TEST] Found image transfer Event ID\n");
+    if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+      for (const auto& inc: pendingIncidents) {
+        if (inc.eventId == num) {
+          if (Serial) {
+            Serial.printf("[BLE TEST] Found image transfer Event ID\n");
+          }
+          handleImageRequest(inc.folderPath, inc.eventId, 0, 0);
+          break;
         }
-        handleImageRequest(inc.folderPath, inc.eventId, 0, 0);
-        break;
       }
+      xSemaphoreGive(incidentMutex);
     }
   }
 }

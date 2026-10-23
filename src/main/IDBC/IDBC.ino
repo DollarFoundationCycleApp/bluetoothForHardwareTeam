@@ -745,4 +745,5 @@ void loop() {
         }
     }
   }
+  handlePendingBluetoothTasks();
 }

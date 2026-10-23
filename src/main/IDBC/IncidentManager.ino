@@ -37,18 +37,21 @@ void queueIncidentFolders(const char* baseFolderPath) {
                   .eventId = eventId,
                   .folderPath = fullPath
               };
-              for (const auto& inc : pendingIncidents) {
-                  if (inc.eventId == eventId) {
-                      alreadyExists = true;
-                      break;
-                  }
-              }
-              if (!alreadyExists) {
-                  pendingIncidents.push_back(meta);
-                if (Serial){
-                  Serial.printf("Queued incident folder: %s  ", meta.folderPath);
-                  Serial.printf("[BLE Debug] EventId: %lu\n", meta.eventId);
+              if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                for (const auto& inc : pendingIncidents) {
+                    if (inc.eventId == eventId) {
+                        alreadyExists = true;
+                        break;
+                    }
                 }
+                if (!alreadyExists) {
+                    pendingIncidents.push_back(meta);
+                  if (Serial){
+                    Serial.printf("Queued incident folder: %s  ", meta.folderPath);
+                    Serial.printf("[BLE Debug] EventId: %lu\n", meta.eventId);
+                  }
+                }
+                xSemaphoreGive(incidentMutex);
               }
             }
         }
@@ -92,17 +95,25 @@ bool removeDirRecursive(fs::FS &fs, const char *path) {
 * Helper to build queue again to encompass new incidents
 */
 void refreshList() {
-  if(!pendingIncidents.empty()){
-    pendingIncidents.clear();
+  if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    if(!pendingIncidents.empty()){
+      pendingIncidents.clear();
+    }
+    xSemaphoreGive(incidentMutex);
   }
-  yield();
   queueIncidentFolders("/");
   yield();
-  if(pendingIncidents.empty()){ // attempting a new path to get it. Depends on SD for various ways that can work
-    queueIncidentFolders("");
+  if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    if(pendingIncidents.empty()){ // attempting a new path to get it. Depends on SD for various ways that can work
+      queueIncidentFolders("");
+    }
+    xSemaphoreGive(incidentMutex);
   }
   yield();
-  if(pendingIncidents.empty()) {
-    queueIncidentFolders("./");
+  if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    if(pendingIncidents.empty()) {
+      queueIncidentFolders("./");
+    }
+    xSemaphoreGive(incidentMutex);
   }
 }

@@ -2,15 +2,20 @@
 #define INCIDENT_MANAGER_H
 
 #include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <vector>
 #include <FS.h>
 #include <SD.h>
+
 
 // 1. Define the struct where both files can see it
 struct IncidentMetadata {
     unsigned long eventId;
     String folderPath;
 };
+
+extern SemaphoreHandle_t incidentMutex;
 
 // 2. Declare the global vector extern so it's shared safely across files
 extern std::vector<IncidentMetadata> pendingIncidents;
