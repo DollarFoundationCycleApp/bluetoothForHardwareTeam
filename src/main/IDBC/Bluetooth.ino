@@ -138,10 +138,11 @@ struct PendingImageRequest {
     char targetFolder[64];
 };
 
-static PendingImageRequest pendingImageReq = { .active = false };
+static QueueHandle_t bleImageReqQueue = nullptr;
 
 void initBLE() {
   incidentMutex = xSemaphoreCreateMutex();
+  bleImageReqQueue = xQueueCreate(10, sizeof(PendingImageRequest));
   // Release Classic BT memory footprint back to system heap
   esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
 
@@ -353,7 +354,7 @@ bool sendDeviceToAppResponse(const IDBC_DeviceToApp* response) {
     pTxCharacteristic->setValue(buffer, stream.bytes_written);
     if (deviceConnected) {
     pTxCharacteristic->notify();
-    vTaskDelay(pdMS_TO_TICKS(10)); // Allow BLE stack ring buffer to clear out
+    vTaskDelay(pdMS_TO_TICKS(20)); // Allow BLE stack ring buffer to clear out
     Serial.println("[BLE DEBUG] SENT");
     return true;
     } else {
@@ -390,20 +391,26 @@ void handleProtobufCommand(const IDBC_AppToDevice* appCmd) {
           break;
         }
 
-        // DEFER EXECUTION: Store request parameters safely instead of running SD here
-        pendingImageReq.active = true;
-        pendingImageReq.eventId = req.event_id;
-        pendingImageReq.startImage = req.start_from_image;
-        pendingImageReq.startChunk = req.start_from_chunk;
-        snprintf(pendingImageReq.targetFolder, sizeof(pendingImageReq.targetFolder), "%s", targetFolder.c_str());
+        // Enqueue the request so nothing gets overwritten
+        PendingImageRequest reqItem;
+        reqItem.eventId = req.event_id;
+        reqItem.startImage = req.start_from_image;
+        reqItem.startChunk = req.start_from_chunk;
+        snprintf(reqItem.targetFolder, sizeof(reqItem.targetFolder), "%s", targetFolder.c_str());
 
-        if (Serial) {
-          Serial.println("[BLE] Image request deferred to main loop.");
+        if (xQueueSend(bleImageReqQueue, &reqItem, 0) != pdTRUE) {
+          if (Serial) {
+            Serial.println("[BLE ERROR] Image request queue is full!");
+          }
+        } else {
+          if (Serial) {
+            Serial.println("[BLE] Image request queued successfully.");
+          }
         }
         break;
       }
-
-      const auto& ack = appCmd->payload.event_transfer_ack;
+      case IDBC_AppToDevice_event_transfer_ack_tag: {
+        const auto& ack = appCmd->payload.event_transfer_ack;
           if (Serial) {
               Serial.printf("[BLE] Got ACK from phone for Event ID %lu. Preparing safe cleanup...\n", ack.event_id);
           }
@@ -415,11 +422,11 @@ void handleProtobufCommand(const IDBC_AppToDevice* appCmd) {
               if (it->eventId == ack.event_id) {
                 String folderPathToClean = it->folderPath;
                     
-                // Remove from tracking vector so no new requests look for it
+                // Remove from tracking vector first so no new requests look for it
                 pendingIncidents.erase(it);
-                // Give the driver a brief moment to close any trailing file descriptors
+                // Give the OS/SD driver a brief moment to close any trailing file descriptors
                 vTaskDelay(pdMS_TO_TICKS(50));
-                xSemaphoreGive(incidentMutex); 
+                xSemaphoreGive(incidentMutex); // Release mutex before doing slow SD operations!
                 // Attempt recursive wipe with retry logic
                 bool deleted = false;
                 for (int attempt = 0; attempt < 3 && !deleted; attempt++) {
@@ -700,7 +707,7 @@ bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageInd
   infoResp.payload.image_info.total_chunks = totalChunks;
   infoResp.payload.image_info.image_format = format;
   sendDeviceToAppResponse(&infoResp);
-  vTaskDelay(pdMS_TO_TICKS(40));
+  vTaskDelay(pdMS_TO_TICKS(60));
 
   // 2. Stream chunks directly from the file without ever using malloc!
   for (uint32_t c = startChunk; c < totalChunks; c++) {
@@ -725,7 +732,7 @@ bool handleImageRequest(String targetFolder, uint32_t eventId, uint32_t imageInd
     chunkResp.payload.image_chunk = chunk;
     
     sendDeviceToAppResponse(&chunkResp);
-    vTaskDelay(pdMS_TO_TICKS(80));
+    vTaskDelay(pdMS_TO_TICKS(250));
   }
   if (Serial) {
     Serial.println("[BLE DEBUG] Chunks have been sent.");
@@ -771,26 +778,22 @@ String findTargetPath(unsigned long event_id) {
 }
 
 void handlePendingBluetoothTasks() {
-  if (!pendingImageReq.active) return;
+  if (!bleImageReqQueue) return;
 
-  // Copy parameters locally and clear active flag immediately
-  uint32_t eventId = pendingImageReq.eventId;
-  uint32_t startImg = pendingImageReq.startImage;
-  uint32_t startChunk = pendingImageReq.startChunk;
-  String folder = String(pendingImageReq.targetFolder);
-  
-  pendingImageReq.active = false;
+  PendingImageRequest reqItem;
+  // Pull one request from the queue without blocking loop()
+  if (xQueueReceive(bleImageReqQueue, &reqItem, 0) == pdTRUE) {
+    if (Serial) {
+      Serial.printf("[LOOP] Processing queued transfer: Event %lu, Image Index %lu\n", 
+                    reqItem.eventId, reqItem.startImage);
+    }
 
-  if (Serial) {
-    Serial.println("[LOOP] Processing deferred image transfer request...");
+    bool success = handleImageRequest(String(reqItem.targetFolder), reqItem.eventId, reqItem.startImage, reqItem.startChunk);
+    if (!success && Serial) {
+      Serial.println("[LOOP Error] Failed to complete deferred image transfer.");
+    }
+    vTaskDelay(pdMS_TO_TICKS(500));
   }
-
-  // Now runs safely on the main loopTask stack (which has plenty of headroom)
-  bool success = handleImageRequest(folder, eventId, startImg, startChunk);
-  if (!success && Serial) {
-    Serial.println("[LOOP Error] Failed to complete deferred image transfer.");
-  }
-  vTaskDelay(pdMS_TO_TICKS(50));
 }
 
 /** 
