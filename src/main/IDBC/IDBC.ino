@@ -670,9 +670,6 @@ void setup() {
 }
 
 void loop() {
-  delay(100);
-  /*
-  serial_print("[Main Debug] Start of loop");
   // Clears the trigPin
   digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
@@ -745,16 +742,14 @@ void loop() {
             ); // */
             // /*
             // Test image transfer over proto
-            ///////////// runTransferTest((uint32_t)11, (uint8_t)0);
+            runTransferTest((uint32_t)11, (uint8_t)0);
             // */
-            /**
         } else {
             Serial.println("Button pressed, but BLE is not connected!");
         }
     }
   }
   handle_pending_bluetooth_tasks();
-  */
 }
 
 
