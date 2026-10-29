@@ -53,8 +53,13 @@ extern "C" {
 #define FALSE 0
 #endif
 
-// TODO strucutre for pending Incidents I called it IncidentNode, but it can be something else.
-
+// --- Linked List Node Structure ---
+typedef struct IncidentNode {
+    uint32_t eventId;
+    char folderPath[MAX_PATH_LEN];
+    uint8_t active;
+    struct IncidentNode* next; // Pointer to the next incident node
+} IncidentNode;
 
 // Shared Globals
 extern SemaphoreHandle_t incidentMutex;
