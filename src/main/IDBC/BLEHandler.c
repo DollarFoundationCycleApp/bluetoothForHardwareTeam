@@ -246,7 +246,6 @@ static void ble_app_on_sync(void) {
 * Main initialization routine for BLE, queues, and security policies.
 */
 void init_ble(void) { // todo verify this method gets through successfully. 
-  serial_print("[BLE Debug] Start of init_ble\n");
   esp_err_t ret = nvs_flash_init();
   if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     nvs_flash_erase();
@@ -260,56 +259,36 @@ void init_ble(void) { // todo verify this method gets through successfully.
   }
 
   bleImageReqQueue = xQueueCreate(10, sizeof(PendingImageRequest));
-if (bleImageReqQueue == NULL) {
-  serial_print("[BLE Error] Failed to create image request queue\n");
-  return;
-}
-
-  serial_print("[BLE Debug] Here 1\n");
+  if (bleImageReqQueue == NULL) {
+    serial_print("[BLE Error] Failed to create image request queue\n");
+    return;
+  }
 
   //Release Classic BT memory footprint back to system heap
-  serial_print("[BLE Debug] Before mem_release");
   esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
-  serial_print("[BLE Debug] After mem_release\n");
 
   //Initialize NimBLE port
-  serial_print("[BLE Debug] Before port_init");
   nimble_port_init();
-  serial_print("[BLE Debug] After port_init\n");
 
   //Set required host configuration & callbacks
-  serial_print("[BLE Debug] Start of config & callbacks");
   ble_hs_cfg.reset_cb = ble_app_on_reset;
-  serial_print("[BLE Debug] After reset");
   ble_hs_cfg.sync_cb = ble_app_on_sync;
-  serial_print("[BLE Debug] After sync");
   ble_hs_cfg.sm_bonding = 1;
-  serial_print("[BLE Debug] After bonding");
   ble_hs_cfg.sm_io_cap = BLE_HS_IO_NO_INPUT_OUTPUT;
-  serial_print("[BLE Debug] After io cap");
   ble_hs_cfg.sm_mitm = 0;
-  serial_print("[BLE Debug] After mitm");
   ble_hs_cfg.sm_sc = 1;
-  serial_print("[BLE Debug] After sc\n");
 
-  serial_print("[BLE Debug] Before loading saved devices");
   load_saved_devices();
   print_saved_devices();
 
-  //serial_print("[BLE Debug] Before power set");
   //esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL_P9);
-  //serial_print("[BLE Debug] After power set");
 
   //Register GATT Services
-  serial_print("[BLE Debug] Before count_cfg");
   int rc = ble_gatts_count_cfg(gatt_svr_svcs);
   assert(rc == 0);
-  serial_print("[BLE Debug] After count_cfg");
 
-  serial_print("[BLE Debug] Before add svcs");
   rc = ble_gatts_add_svcs(gatt_svr_svcs);
   assert(rc == 0);
-  serial_print("[BLE Debug] After add_svcs");
 
   //Start the GATT Server & Device Name
   //serial_print("[BLE Debug] Before gatts_start");
@@ -317,20 +296,15 @@ if (bleImageReqQueue == NULL) {
   //assert(rc == 0);
   //serial_print("[BLE Debug] After gatts_start");
 
-  serial_print("[BLE Debug] Before device_name_set");
   ble_svc_gap_device_name_set(DEVICE_NAME);
-  serial_print("[BLE Debug] After device_name_set");
 
   //Start FreeRTOS NimBLE host background task runner
-  serial_print("[BLE Debug] Before freertos_init");
   nimble_port_freertos_init(nimble_host_task);
-  serial_print("[BLE Debug] After freertos_init");
 
   deviceReady = TRUE;
   ESP_LOGI(TAG, "========================================");
   ESP_LOGI(TAG, "BLE Server Started: %s", DEVICE_NAME);
   ESP_LOGI(TAG, "========================================");
-  serial_print("[BLE Debug] End of init_ble");
 }
 
 /**
@@ -756,6 +730,7 @@ void handle_pending_bluetooth_tasks(void) {
 * Configures advertising parameters and starts broadcasting.
 */
 static void start_advertising(void) {
+  /*
   struct ble_hs_adv_fields fields;
   memset(&fields, 0, sizeof(fields));
 
@@ -780,6 +755,56 @@ static void start_advertising(void) {
 
   // Start advertising with GAP event callback registered
   ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER, &adv_params, gap_event_handler, NULL);
+  */
+  struct ble_hs_adv_fields fields;
+  memset(&fields, 0, sizeof(fields));
+
+  fields.name = (uint8_t *)DEVICE_NAME;
+  fields.name_len = strlen(DEVICE_NAME);
+  fields.name_is_complete = 1;
+  fields.appearance = 0x03C1;
+  fields.appearance_is_present = 1;
+  fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+
+  //fields.uuids128 = (ble_uuid128_t[]){uuid_service_data};
+  //fields.num_uuids128 = 1;
+  //fields.uuids128_is_complete = 1;
+
+  int rc = ble_gap_adv_set_fields(&fields);
+
+  char msg[64];
+  snprintf(msg, sizeof(msg),
+           "[BLE Debug] adv_set_fields rc=%d", rc);
+  serial_print(msg);
+
+  if (rc != 0) {
+    serial_print("[BLE Error] Failed to set advertising fields");
+    return;
+  }
+
+  struct ble_gap_adv_params adv_params;
+  memset(&adv_params, 0, sizeof(adv_params));
+  adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
+  adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+
+  rc = ble_gap_adv_start(
+      BLE_OWN_ADDR_PUBLIC,
+      NULL,
+      BLE_HS_FOREVER,
+      &adv_params,
+      gap_event_handler,
+      NULL
+  );
+
+  snprintf(msg, sizeof(msg),
+           "[BLE Debug] adv_start rc=%d", rc);
+  serial_print(msg);
+
+  if (rc != 0) {
+    serial_print("[BLE Error] Failed to start advertising");
+  } else {
+    serial_print("[BLE Debug] Advertising started successfully");
+  }
 }
 
 
