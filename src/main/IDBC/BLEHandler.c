@@ -8,9 +8,11 @@
 #include "IBDC_v0.3.2.pb.h"
 
 #include "esp_bt.h"
+#include <esp_log.h>
+#include "esp_heap_caps.h"
+#include "esp_system.h"
 #include <stdio.h>
 #include <string.h>
-#include <esp_log.h>
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -151,7 +153,9 @@ static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
 static int gap_event_handler(struct ble_gap_event *event, void *arg) {
   switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
+      serial_print("[BLE Debug] CONNECT Event");
       if (event->connect.status == 0) {
+        serial_print("[BLE Debug] Connection Successful");
         deviceConnected = TRUE;
         current_conn_handle = event->connect.conn_handle;
         
@@ -169,14 +173,20 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg) {
         save_device_address(clientMac);
       } else {
         ESP_LOGW(TAG, "Connection failed. Restarting advertising...");
+        serial_print("[BLE Debug] Advertising requested by failed connection");
+        ESP_LOGW(TAG, "Connection failed. Status: %d", event->connect.status);
+        ESP_LOGI(TAG, "Free heap: %u bytes", (unsigned int)esp_get_free_heap_size());
+        ESP_LOGI(TAG, "Largest free block: %u bytes", (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
         start_advertising();
       }
       break;
       
     case BLE_GAP_EVENT_DISCONNECT:
+      serial_print("[BLE Debug] DISCONNECT Event");
       deviceConnected = FALSE;
       current_conn_handle = 0;
       ESP_LOGI(TAG, ">>> BLE DISCONNECTED (Reason: %d). Restarting Advertising... <<<", event->disconnect.reason);
+      serial_print("[BLE Debug] Advertising requested by disconnect");
       start_advertising();
       break;
       
@@ -231,6 +241,7 @@ static void on_stack_reset(int reason) {
 
 static void on_stack_sync(void) {
     // Start advertising once the stack is synced and ready
+    serial_print("[BLE Debug] Advertising requested by stack sync");
     start_advertising();
 }
 
@@ -245,7 +256,7 @@ static void ble_app_on_sync(void) {
 /**
 * Main initialization routine for BLE, queues, and security policies.
 */
-void init_ble(void) { // todo verify this method gets through successfully. 
+void init_ble(void) { 
   esp_err_t ret = nvs_flash_init();
   if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     nvs_flash_erase();
@@ -730,32 +741,7 @@ void handle_pending_bluetooth_tasks(void) {
 * Configures advertising parameters and starts broadcasting.
 */
 static void start_advertising(void) {
-  /*
-  struct ble_hs_adv_fields fields;
-  memset(&fields, 0, sizeof(fields));
-
-  fields.name = (uint8_t *)DEVICE_NAME;
-  fields.name_len = strlen(DEVICE_NAME);
-  fields.name_is_complete = 1;
-  fields.appearance = 0x03C1; // Standard Keyboard Icon
-  fields.appearance_is_present = 1;
-  fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-
-  // Put custom data service UUID first in advertisement
-  fields.uuids128 = (ble_uuid128_t[]){uuid_service_data};
-  fields.num_uuids128 = 1;
-  fields.uuids128_is_complete = 1;
-
-  ble_gap_adv_set_fields(&fields);
-
-  struct ble_gap_adv_params adv_params;
-  memset(&adv_params, 0, sizeof(adv_params));
-  adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
-  adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
-
-  // Start advertising with GAP event callback registered
-  ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER, &adv_params, gap_event_handler, NULL);
-  */
+  serial_print("[BLE Debug] Entering start_advertising()");
   struct ble_hs_adv_fields fields;
   memset(&fields, 0, sizeof(fields));
 
@@ -766,6 +752,7 @@ static void start_advertising(void) {
   fields.appearance_is_present = 1;
   fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
 
+  // Put custom data service UUID first in advertisement
   //fields.uuids128 = (ble_uuid128_t[]){uuid_service_data};
   //fields.num_uuids128 = 1;
   //fields.uuids128_is_complete = 1;
@@ -787,6 +774,7 @@ static void start_advertising(void) {
   adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
   adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
 
+  // Start advertising with GAP event callback registered
   rc = ble_gap_adv_start(
       BLE_OWN_ADDR_PUBLIC,
       NULL,
