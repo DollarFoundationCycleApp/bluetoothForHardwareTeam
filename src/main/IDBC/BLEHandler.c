@@ -1,3 +1,4 @@
+
 #include "BLEHandler.h"
 #include "IncidentManager.h"
 #include "ImageChunker.h"
@@ -21,6 +22,7 @@
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
+#include "host/util/util.h"
 #include "host/ble_gatt.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
@@ -29,8 +31,17 @@
 
 #define TAG "BLE_HANDLER"
 
+#undef ESP_LOGI
+#undef ESP_LOGW
+#undef ESP_LOGE
+
 //todo delete this before prod
 extern void serial_print(const char* str);
+
+#define ESP_LOGI(tag, format, ...) { char buf[128]; snprintf(buf, sizeof(buf), "[INFO] " format, ##__VA_ARGS__); serial_print(buf); }
+#define ESP_LOGW(tag, format, ...) { char buf[128]; snprintf(buf, sizeof(buf), "[WARN] " format, ##__VA_ARGS__); serial_print(buf); }
+#define ESP_LOGE(tag, format, ...) { char buf[128]; snprintf(buf, sizeof(buf), "[ERROR] " format, ##__VA_ARGS__); serial_print(buf); }
+
 
 
 // --- Custom UUIDs for Data/File Transfers (Little-Endian format for raw C structs) ---
@@ -87,18 +98,71 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd);
 static uint8_t send_device_to_app_response(const IDBC_DeviceToApp* response);
 
 static int hid_info_access_cb(uint16_t handle, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg) {
+    if (!ctxt || !ctxt->om) return 0; 
     const uint8_t hidInfoVal[] = {0x11, 0x01, 0x00, 0x02};
     return os_mbuf_append(ctxt->om, hidInfoVal, sizeof(hidInfoVal)) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
 static int hid_report_map_access_cb(uint16_t handle, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg) {
+    if (!ctxt || !ctxt->om) return 0; 
     return os_mbuf_append(ctxt->om, hidReportDescriptor, sizeof(hidReportDescriptor)) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+
+static int hid_protocol_mode_access_cb(uint16_t handle, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg) {
+    if (!ctxt || !ctxt->om) return 0;
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        uint8_t mode = 0x01;
+        return os_mbuf_append(ctxt->om, &mode, sizeof(mode)) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    return 0;
+}
+
+static int hid_report_ref_access_cb(uint16_t handle, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg) {
+    if (!ctxt || !ctxt->om) return 0;
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_DSC) {
+        uint8_t refVal[] = {0x01, 0x01};
+        return os_mbuf_append(ctxt->om, refVal, sizeof(refVal)) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    return 0;
+}
+
+static int hid_input_report_access_cb(uint16_t handle, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg) {
+    if (!ctxt || !ctxt->om) return 0;
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        uint8_t dummyReport[6] = {0};
+        return os_mbuf_append(ctxt->om, dummyReport, sizeof(dummyReport)) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    return 0;
 }
 
 static int tx_characteristic_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                                      struct ble_gatt_access_ctxt *ctxt, void *arg) {
-    // TX characteristic is used for notifications, but standard reads can return ok or empty
+    if (!ctxt) return BLE_ATT_ERR_INVALID_HANDLE; 
     return 0;
+}
+
+static int rx_characteristic_access_cb(uint16_t conn_handle, uint16_t attr_handle,
+                     struct ble_gatt_access_ctxt *ctxt, void *arg) {
+  if (!ctxt || !ctxt->om) return BLE_ATT_ERR_INVALID_HANDLE;
+  
+  if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+    uint16_t data_len = OS_MBUF_PKTLEN(ctxt->om);
+    uint8_t rx_buffer[512];
+    if (data_len > sizeof(rx_buffer)) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+
+    int rc = ble_hs_mbuf_to_flat(ctxt->om, rx_buffer, data_len, &data_len);
+    if (rc != 0) return BLE_ATT_ERR_UNLIKELY;
+
+    IDBC_AppToDevice appCmd = IDBC_AppToDevice_init_default;
+    pb_istream_t stream = pb_istream_from_buffer(rx_buffer, data_len);
+
+    if (pb_decode(&stream, IDBC_AppToDevice_fields, &appCmd)) {
+      handle_protobuf_command(&appCmd);
+    } else {
+      ESP_LOGE(TAG, "Protobuf Decode Error: %s", PB_GET_ERROR(&stream));
+    }
+  }
+  return 0;
 }
 
 // --- GATT Server Table ---
@@ -109,33 +173,49 @@ static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
     .uuid = BLE_UUID16_DECLARE(0x1812),
     .characteristics = (struct ble_gatt_chr_def[]) {
       {
-        .uuid = BLE_UUID16_DECLARE(0x2A4A),
-        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC,
+        .uuid = BLE_UUID16_DECLARE(0x2A4A), // HID Information
+        .flags = BLE_GATT_CHR_F_READ, // Removed _ENC - app crashes connection with enc
         .access_cb = hid_info_access_cb
       },
       {
-        .uuid = BLE_UUID16_DECLARE(0x2A4B),
-        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC,
+        .uuid = BLE_UUID16_DECLARE(0x2A4B), // Report Map
+        .flags = BLE_GATT_CHR_F_READ, // Removed _ENC
         .access_cb = hid_report_map_access_cb
+      },
+      {
+        .uuid = BLE_UUID16_DECLARE(0x2A4E), // Protocol Mode
+        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE_NO_RSP, // Removed _ENC
+        .access_cb = hid_protocol_mode_access_cb
+      },
+      {
+        .uuid = BLE_UUID16_DECLARE(0x2A4D), // HID Report (Input)
+        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY, // Removed _ENC
+        .descriptors = (struct ble_gatt_dsc_def[]) {
+          {
+            .uuid = BLE_UUID16_DECLARE(0x2908), // Report Reference Descriptor
+            .att_flags = BLE_ATT_F_READ, // Removed _ENC
+            .access_cb = hid_report_ref_access_cb
+          },
+          { 0 }
+        },
+        .access_cb = hid_input_report_access_cb
       },
       { 0 }
     }
   },
   {
-    /* Service 2: Custom Service (For Protobuf / File / Data Transfer) */
+    /* Service 2: Custom Service (For Protobuf / Data Transfer) */
     .type = BLE_GATT_SVC_TYPE_PRIMARY,
     .uuid = &uuid_service_data.u,
     .characteristics = (struct ble_gatt_chr_def[]) {
       {
-        /* RX Characteristic: App -> Device Commands */
         .uuid = &uuid_char_rx.u,
-        .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_WRITE_ENC,
+        .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP, // Removed _ENC
         .access_cb = rx_characteristic_access_cb
       },
       {
-        /* TX Characteristic: Device -> App Notifications */
         .uuid = &uuid_char_tx.u,
-        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_READ_ENC,
+        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY, // Removed _ENC
         .val_handle = &tx_val_handle,
         .access_cb = tx_characteristic_access_cb
       },
@@ -167,12 +247,25 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg) {
         
         ESP_LOGI(TAG, ">>> CONNECTED NATIVELY! Address: %s <<<", clientMac);
         save_device_address(clientMac);
+
+        // Request stable connection parameters to prevent instant supervision timeouts
+        struct ble_gap_upd_params params = {
+            .itvl_min = 24,  // 30ms
+            .itvl_max = 40,  // 50ms
+            .latency = 0,
+            .supervision_timeout = 400 // 4 seconds
+        };
+        ble_gap_update_params(current_conn_handle, &params);
+
       } else {
         ESP_LOGW(TAG, "Connection failed. Restarting advertising...");
+        serial_print("[BLE Debug] Advertising requested by failed connection");
+        ESP_LOGW(TAG, "Connection failed. Status: %d", event->connect.status);
+        ESP_LOGI(TAG, "Free heap: %u bytes", (unsigned int)esp_get_free_heap_size());
+        ESP_LOGI(TAG, "Largest free block: %u bytes", (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
         start_advertising();
       }
       break;
-      
     case BLE_GAP_EVENT_DISCONNECT:
       deviceConnected = FALSE;
       current_conn_handle = 0;
@@ -181,87 +274,94 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg) {
       break;
       
     case BLE_GAP_EVENT_ENC_CHANGE:
-      ESP_LOGI(TAG, ">>> Pairing & Encryption Complete! Bound to Phone OS. <<<");
+      if (event->enc_change.status == 0) {
+          ESP_LOGI(TAG, ">>> Pairing & Encryption Complete! Native OS Bond Established. <<<");
+      } else {
+          ESP_LOGW(TAG, "Encryption/Pairing failed, status: %d", event->enc_change.status);
+      }
       break;
       
+    case BLE_GAP_EVENT_PASSKEY_ACTION:
+      {
+          struct ble_sm_io pkey = {0};
+          pkey.action = event->passkey.params.action;
+
+          if (pkey.action == BLE_SM_IOACT_NUMCMP) {
+              pkey.numcmp_accept = 1;
+              ble_sm_inject_io(event->passkey.conn_handle, &pkey);
+              ESP_LOGI(TAG, "Numeric comparison accepted automatically.");
+          } else if (pkey.action == BLE_SM_IOACT_DISP) {
+              pkey.passkey = 123456; // Hardcoded passkey for pairing
+              ble_sm_inject_io(event->passkey.conn_handle, &pkey);
+              ESP_LOGI(TAG, "Display passkey injected: 123456");
+          }
+      }
+      break;
+
     default:
       break;
   }
   return 0;
 }
 
-/**
-* RX Callback: Handles incoming write requests on the custom protobuf characteristic.
-*/
-static int rx_characteristic_access_cb(uint16_t conn_handle, uint16_t attr_handle,
-                     struct ble_gatt_access_ctxt *ctxt, void *arg) {
-  if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
-    uint16_t data_len = OS_MBUF_PKTLEN(ctxt->om);
-    uint8_t rx_buffer[512];
-    if (data_len > sizeof(rx_buffer)) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-
-    // Flatten the incoming OS network buffer into a clean C byte array
-    int rc = ble_hs_mbuf_to_flat(ctxt->om, rx_buffer, data_len, &data_len);
-    if (rc != 0) return BLE_ATT_ERR_UNLIKELY;
-
-    // Decode incoming Nanopb AppToDevice frame
-    IDBC_AppToDevice appCmd = IDBC_AppToDevice_init_default;
-    pb_istream_t stream = pb_istream_from_buffer(rx_buffer, data_len);
-
-    if (pb_decode(&stream, IDBC_AppToDevice_fields, &appCmd)) {
-      handle_protobuf_command(&appCmd);
-    } else {
-      ESP_LOGE(TAG, "Protobuf Decode Error: %s", PB_GET_ERROR(&stream));
-    }
-  }
-  return 0;
-}
-
 static void nimble_host_task(void *param) {
-    // This runs the NimBLE host background processing loop
-    nimble_port_run();
-    nimble_port_freertos_deinit();
+  ESP_LOGI(TAG, "NimBLE host task entered");
+  // This runs the NimBLE host background processing loop
+  nimble_port_run();
+  nimble_port_freertos_deinit();
 }
 
 static void on_stack_reset(int reason) {
-    ESP_LOGW(TAG, "NimBLE host reset, reason: %d", reason);
+  ESP_LOGW(TAG, "NimBLE host reset, reason: %d", reason);
 }
 
 static void on_stack_sync(void) {
-    // Start advertising once the stack is synced and ready
-    start_advertising();
-}
+    serial_print("[ble debug] CALLBACK: entered on_stack_sync");
 
-static void ble_app_on_reset(int reason) {
-    ESP_LOGW(TAG, "NimBLE host reset, reason: %d", reason);
+    start_advertising();
+    serial_print("[ble debug] stack synced & advertising started");
 }
 
 static void ble_app_on_sync(void) {
-    on_stack_sync();
+  ESP_LOGI(TAG, "[ble debug] CALLBACK: entered ble_app_on_sync");
+  on_stack_sync();
 }
+
+static void ble_app_on_reset(int reason) {
+  ESP_LOGW(TAG, "NimBLE host reset, reason: %d", reason);
+}
+
 
 /**
 * Main initialization routine for BLE, queues, and security policies.
 */
-void init_ble(void) { // todo verify this method gets through successfully. 
-  serial_print("[ble debug] start of init");
+void init_ble(void) { 
+  esp_log_level_set("*", ESP_LOG_VERBOSE);
+  esp_log_level_set(TAG, ESP_LOG_VERBOSE);
+  esp_log_level_set("INCIDENT_MANAGER", ESP_LOG_VERBOSE);
+
+  ESP_LOGI(TAG, "[ble debug] start of init");
+
   esp_err_t ret = nvs_flash_init();
   if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     nvs_flash_erase();
     nvs_flash_init();
   }
   
-  incidentMutex = xSemaphoreCreateMutex();
-  bleImageReqQueue = xQueueCreate(10, sizeof(PendingImageRequest));
-  serial_print("[ble debug] here 1");
-
-  //Release Classic BT memory footprint back to system heap
   esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
 
-  //Initialize NimBLE port
-  nimble_port_init();
+  incidentMutex = xSemaphoreCreateMutex();
+  bleImageReqQueue = xQueueCreate(10, sizeof(PendingImageRequest));
+  ESP_LOGI(TAG, "[ble debug] here 1");
 
-  //Set required host configuration & callbacks
+  nimble_port_init();
+  ble_svc_gap_init();
+  ble_svc_gatt_init();
+  int rc = ble_svc_gap_device_name_set(DEVICE_NAME);
+  assert(rc == 0);
+
+  ESP_LOGI(TAG, "[ble debug] here 2");
+  
   ble_hs_cfg.reset_cb = ble_app_on_reset;
   ble_hs_cfg.sync_cb = ble_app_on_sync;
   ble_hs_cfg.sm_bonding = 1;
@@ -271,24 +371,20 @@ void init_ble(void) { // todo verify this method gets through successfully.
 
   load_saved_devices();
   print_saved_devices();
+  ESP_LOGI(TAG, "[ble debug] here 3");
 
-  esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL_P9);
-
-  //Register GATT Services
-  int rc = ble_gatts_count_cfg(gatt_svr_svcs);
+  rc = ble_gatts_count_cfg(gatt_svr_svcs);
   assert(rc == 0);
 
   rc = ble_gatts_add_svcs(gatt_svr_svcs);
   assert(rc == 0);
 
-  //Start the GATT Server & Device Name
-  rc = ble_gatts_start();
-  assert(rc == 0);
+  // rc = ble_gatts_start(); assert(rc == 0);
+  
+  ESP_LOGI(TAG, "[ble debug] here 4");
+  vTaskDelay(pdMS_TO_TICKS(100));
 
-  ble_svc_gap_device_name_set(DEVICE_NAME);
-
-  //Start FreeRTOS NimBLE host background task runner
-  nimble_port_freertos_init(nimble_host_task);
+  nimble_port_freertos_init(nimble_host_task); 
 
   deviceReady = TRUE;
   ESP_LOGI(TAG, "========================================");
@@ -319,7 +415,6 @@ void load_saved_devices(void) {
       snprintf(keyBuf, sizeof(keyBuf), "dev_%d", i);
       
       size_t required_size = MAC_STR_LEN;
-      // Safely fetch string with error checking
       if (nvs_get_str(nvs_handle, keyBuf, recentDevices[i], &required_size) != ESP_OK) {
         recentDevices[i][0] = '\0';
       }
@@ -385,8 +480,8 @@ void print_saved_devices(void) {
 * Encodes and sends a DeviceToApp protobuf response back to the phone via TX characteristic notifications.
 */
 static uint8_t send_device_to_app_response(const IDBC_DeviceToApp* response) {
-  if (!deviceConnected) {
-    ESP_LOGW(TAG, "Error sending: Device not connected.");
+  if (!deviceConnected || tx_val_handle == 0) {
+    ESP_LOGW(TAG, "Error sending: Device not connected or TX handle uninitialized.");
     return FALSE;
   }
 
@@ -428,16 +523,14 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
   switch (appCmd->which_payload) {
     case IDBC_AppToDevice_image_transfer_request_tag: {
       const IDBC_ImageTransferRequest* req = &appCmd->payload.image_transfer_request;
-      ESP_LOGI(TAG, "Proto Req: Transfer Image - Event ID: %lu, Start Img: %lu, Start Chunk: %lu", 
-           req->event_id, req->start_from_image, req->start_from_chunk);
+      ESP_LOGI(TAG, "Proto Req: Transfer Image - Event ID: %lu", req->event_id);
       
       const char* targetFolder = find_target_path(req->event_id);
-      if (strlen(targetFolder) == 0) {
+      if (targetFolder == NULL || strlen(targetFolder) == 0) {
         ESP_LOGW(TAG, "[BLE Error] Failed to find target folder for Event ID %lu", req->event_id);
         break;
       }
 
-      // Enqueue the request so nothing gets overwritten
       PendingImageRequest reqItem;
       reqItem.active = TRUE;
       reqItem.eventId = req->event_id;
@@ -447,24 +540,24 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
 
       if (xQueueSend(bleImageReqQueue, &reqItem, 0) != pdTRUE) {
         ESP_LOGE(TAG, "[BLE ERROR] Image request queue is full!");
-      } else {
-        ESP_LOGI(TAG, "[BLE] Image request queued successfully.");
       }
       break;
     }
     
     case IDBC_AppToDevice_event_transfer_ack_tag: {
       const IDBC_EventTransferAck* ack = &appCmd->payload.event_transfer_ack;
-      ESP_LOGI(TAG, "[BLE] Got ACK from phone for Event ID %lu. Preparing safe cleanup...", ack->event_id);
       
       const char* folderPath = find_target_path(ack->event_id);
+      if (folderPath == NULL || strlen(folderPath) == 0) {
+        ESP_LOGW(TAG, "[BLE WARNING] Received ACK for Event ID %lu, but it wasn't found.", ack->event_id);
+        break;
+      }
+
       char folderPathCopy[64];
       snprintf(folderPathCopy, sizeof(folderPathCopy), "%s", folderPath);
-
-      if (strlen(folderPathCopy) > 0) {
-        // Remove from linked list tracking first
-        remove_incident_node(ack->event_id);
-        vTaskDelay(pdMS_TO_TICKS(50));
+      
+      remove_incident_node(ack->event_id);
+      vTaskDelay(pdMS_TO_TICKS(50));
         
         // Attempt recursive wipe with retry logic (Pure C POSIX)
         uint8_t deleted = FALSE;
@@ -484,43 +577,15 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
       break;
     }
 
-    case IDBC_AppToDevice_pending_event_list_request_tag: {
-      ESP_LOGI(TAG, "[BLE] Pending Event List Requested by app.");
-
-      IDBC_DeviceToApp resp = IDBC_DeviceToApp_init_default;
-      resp.which_payload = IDBC_DeviceToApp_pending_event_list_tag;
-      resp.payload.pending_event_list.event_ids_count = 0;
-
-      // Populate event IDs from linked list safely under mutex protection
-      if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        IncidentNode* current = pendingIncidentsHead;
-        while (current != NULL && resp.payload.pending_event_list.event_ids_count < 16) {
-          uint32_t idx = resp.payload.pending_event_list.event_ids_count;
-          resp.payload.pending_event_list.event_ids[idx] = current->eventId;
-          resp.payload.pending_event_list.event_ids_count++;
-          current = current->next;
-        }
-        xSemaphoreGive(incidentMutex);
-      }
-
-      ESP_LOGI(TAG, "[BLE] Sending %u pending event IDs back to phone.", 
-              resp.payload.pending_event_list.event_ids_count);
-
-      send_device_to_app_response(&resp);
-      break;
-    }
-
     case IDBC_AppToDevice_event_info_request_tag: {
       const IDBC_EventInfoRequest* infoReq = &appCmd->payload.event_info_request;
-      ESP_LOGI(TAG, "Proto Req: Event Info for Event ID %lu", infoReq->event_id);
-
+      
       const char* targetFolder = find_target_path(infoReq->event_id);
-      if (strlen(targetFolder) == 0) {
+      if (targetFolder == NULL || strlen(targetFolder) == 0) { // Guarded against NULL
         ESP_LOGW(TAG, "[BLE WARNING] Requested event info for an ID not found.");
         break;
       }
 
-      // POSIX VFS directory scan for image count
       DIR *dir = opendir(targetFolder);
       uint32_t imgCount = 0;
       if (dir != NULL) {
@@ -533,25 +598,19 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
           }
         }
         closedir(dir);
-      } else {
-        ESP_LOGE(TAG, "[SD ERROR] Failed to open event directory via POSIX.");
       }
 
       notify_phone_of_event(
         infoReq->event_id,
-        100,  // Distance placeholder
-        -100, // Time offset placeholder
+        100,
+        -100,
         imgCount,
         IDBC_ImageFormat_IMAGE_FORMAT_JPEG
       );
-
-      ESP_LOGI(TAG, "[BLE] Responded with EventNotification for ID %lu (Images: %lu)", 
-              infoReq->event_id, imgCount);
       break;
     }
 
     default:
-      ESP_LOGW(TAG, "Unknown Protobuf payload tag: %d", (int)appCmd->which_payload);
       break;
   }
 }
@@ -703,7 +762,14 @@ static uint8_t stream_incident_images(uint32_t eventId, const char* folderPath, 
 * Task loop handler to process queued image transfer requests.
 */
 void handle_pending_bluetooth_tasks(void) {
-  if (!bleImageReqQueue) return;
+  if (!deviceReady) {
+    ESP_LOGI(TAG, "attempted to handle bluetooth");
+    return;
+  }
+  if (!bleImageReqQueue) {
+    ESP_LOGE(TAG, "Queue is NULL!");
+    return;
+  }
 
   PendingImageRequest reqItem;
   if (xQueueReceive(bleImageReqQueue, &reqItem, 0) == pdTRUE) {
@@ -711,7 +777,9 @@ void handle_pending_bluetooth_tasks(void) {
         reqItem.eventId, reqItem.startImage, reqItem.startChunk);
 
     // Pass reqItem.eventId into the function
-    stream_incident_images(reqItem.eventId, reqItem.targetFolder, reqItem.startImage, reqItem.startChunk);
+    if (reqItem.targetFolder[0] != '\0') {
+      stream_incident_images(reqItem.eventId, reqItem.targetFolder, reqItem.startImage, reqItem.startChunk);
+    }
   }
 }
 
@@ -719,30 +787,43 @@ void handle_pending_bluetooth_tasks(void) {
 * Configures advertising parameters and starts broadcasting.
 */
 static void start_advertising(void) {
-  struct ble_hs_adv_fields fields;
-  memset(&fields, 0, sizeof(fields));
+    serial_print("[BLE Debug] Entering start_advertising()");
+    
+    struct ble_hs_adv_fields fields;
+    memset(&fields, 0, sizeof(fields));
 
-  fields.name = (uint8_t *)DEVICE_NAME;
-  fields.name_len = strlen(DEVICE_NAME);
-  fields.name_is_complete = 1;
-  fields.appearance = 0x03C1; // Standard Keyboard Icon
-  fields.appearance_is_present = 1;
-  fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+    fields.name = (uint8_t *)DEVICE_NAME;
+    fields.name_len = strlen(DEVICE_NAME);
+    fields.name_is_complete = 1;
+    fields.appearance = 0x03C1;
+    fields.appearance_is_present = 1;
+    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
 
-  // Put custom data service UUID first in advertisement
-  fields.uuids128 = (ble_uuid128_t[]){uuid_service_data};
-  fields.num_uuids128 = 1;
-  fields.uuids128_is_complete = 1;
+    int rc = ble_gap_adv_set_fields(&fields);
+    if (rc != 0) {
+      serial_print("[BLE Error] Failed to set advertising fields");
+      return;
+    }
 
-  ble_gap_adv_set_fields(&fields);
+    struct ble_gap_adv_params adv_params;
+    memset(&adv_params, 0, sizeof(adv_params));
+    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
+    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
 
-  struct ble_gap_adv_params adv_params;
-  memset(&adv_params, 0, sizeof(adv_params));
-  adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
-  adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    rc = ble_gap_adv_start(
+        BLE_OWN_ADDR_PUBLIC,
+        NULL,
+        BLE_HS_FOREVER,
+        &adv_params,
+        gap_event_handler,
+        NULL
+    );
 
-  // Start advertising with GAP event callback registered
-  ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER, &adv_params, gap_event_handler, NULL);
+    if (rc != 0) {
+      serial_print("[BLE Error] Failed to start advertising");
+    } else {
+      serial_print("[BLE Debug] Advertising started successfully");
+    }
 }
 
 
