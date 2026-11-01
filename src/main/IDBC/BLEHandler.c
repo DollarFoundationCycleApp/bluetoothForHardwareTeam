@@ -36,7 +36,9 @@
 #undef ESP_LOGE
 
 //todo delete this before prod
-extern void serial_print(const char* str);
+extern void serial_print(const char* str) {
+  printf("%s\n", str);
+}
 
 #define ESP_LOGI(tag, format, ...) { char buf[128]; snprintf(buf, sizeof(buf), "[INFO] " format, ##__VA_ARGS__); serial_print(buf); }
 #define ESP_LOGW(tag, format, ...) { char buf[128]; snprintf(buf, sizeof(buf), "[WARN] " format, ##__VA_ARGS__); serial_print(buf); }
@@ -559,10 +561,10 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
       remove_incident_node(ack->event_id);
       vTaskDelay(pdMS_TO_TICKS(50));
         
-        // Attempt recursive wipe with retry logic (Pure C POSIX)
-        uint8_t deleted = FALSE;
-        for (int attempt = 0; attempt < 3 && deleted == FALSE; attempt++) {
-          if (attempt > 0) vTaskDelay(pdMS_TO_TICKS(100));
+      // Attempt recursive wipe with retry logic (Pure C POSIX)
+      uint8_t deleted = FALSE;
+      for (int attempt = 0; attempt < 3 && deleted == FALSE; attempt++) {
+        if (attempt > 0) vTaskDelay(pdMS_TO_TICKS(100));
           deleted = remove_dir_recursive(folderPathCopy);
         }
 
@@ -571,9 +573,9 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
         } else {
           ESP_LOGE(TAG, "[SD ERROR] Failed to delete folder. Files may still be active or locked.");
         }
-      } else {
-        ESP_LOGW(TAG, "[BLE WARNING] Received ACK for Event ID %lu, but it wasn't found.", ack->event_id);
-      }
+        //} else {
+        //ESP_LOGW(TAG, "[BLE WARNING] Received ACK for Event ID %lu, but it wasn't found.", ack->event_id);
+        //}
       break;
     }
 
