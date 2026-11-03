@@ -58,6 +58,16 @@ bool buildImageChunk(
     uint32_t chunkSequence,
     IDBC_ImageChunk* output
 );
+
+bool buildImageChunkFromWindow(
+    const uint8_t* windowData,
+    size_t dataSize,
+    uint32_t eventId,
+    uint32_t imageIndex,
+    uint32_t chunkSequence,
+    size_t totalChunks,
+    IDBC_ImageChunk* output
+);
 #ifdef __cplusplus
 }
 #endif

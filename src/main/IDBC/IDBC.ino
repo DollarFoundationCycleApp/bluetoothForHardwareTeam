@@ -12,11 +12,16 @@
 #include <esp_system.h>
 
 #include "detector.h"
+#include "BLEHandler.h"
+#include "IncidentManager.h"
 #include "IBDC_v0.3.2.pb.h"
-// Forward declarations for BLE symbols in Bluetooth.ino
-extern bool deviceConnected;
-void initBLE();
-void notifyPhoneOfEvent(uint32_t eventId, uint32_t distanceCm, uint32_t timeOffsetMs, uint32_t imageCount, uint32_t format);
+
+#define AUSTIN_COMPILES 1
+
+// Forward declarations for BLE symbols in Bluetooth
+extern uint8_t deviceConnected;
+void init_ble();
+void notify_phone_of_event(uint32_t eventId, uint32_t distanceCm, uint32_t timeOffsetMs, uint32_t imageCount, uint32_t format);
 //Button
 const int buttonPin = 4;
 unsigned long lastButtonPressMs = 0;
@@ -245,6 +250,7 @@ void folderInitialization() {
     int folderNumber = atoi(&folderPath[13]);
     folderNumber++;
     sprintf(&folderPath[13], "%d", folderNumber);
+    //esp_task_wdt_reset(); // J2 added for when folder is 100+
     yield();
   }
   SD.mkdir(folderPath);
@@ -590,7 +596,11 @@ void setup() {
   pinMode(yellowLEDPin, OUTPUT);
   pinMode(greenLEDPin, OUTPUT);
 
-  pinMode(buttonPin, INPUT_PULLUP);
+if (AUSTIN_COMPILES == 0) {
+  pinMode(buttonPin, INPUT_PULLUP); // AUSTIN PULLDOWN
+} else {
+  pinMode(buttonPin, INPUT_PULLDOWN);
+}
 
   digitalWrite(redLEDPin, HIGH);
   digitalWrite(yellowLEDPin, HIGH);
@@ -647,7 +657,7 @@ void setup() {
 
   // setup initial folder
   folderInitialization(); // initialization for the folder containing all incidents and data "RecordedData#" This should happen everytime the device is powered on.
-
+  Serial.println("Folder initialized"); // j2 added remove later
   storageQueue = xQueueCreate(512, sizeof(StorageCmd));
 
   detector_set_chunk_start_callback(on_chunk_start);
@@ -657,12 +667,14 @@ void setup() {
 
   xTaskCreatePinnedToCore(storageTask, "StorageTask", 8192, NULL, 1, NULL, 0);
 
+  Serial.println("Storage task handled"); // J2 added remove later
+
   // Signal ready — green on, others off
   digitalWrite(redLEDPin,    LOW);
   digitalWrite(yellowLEDPin, LOW);
   digitalWrite(greenLEDPin,  HIGH);
 
-  initBLE();
+  init_ble();
 }
 
 void loop() {
@@ -721,15 +733,25 @@ void loop() {
     digitalWrite(yellowLEDPin, LOW);
     digitalWrite(greenLEDPin,  HIGH);
   }
-  if (digitalRead(buttonPin) == LOW) {
+  bool pinPress = false;
+  if (AUSTIN_COMPILES == 1){
+    if (digitalRead(buttonPin) == HIGH) {
+      pinPress = true;
+    }
+  } else {
+    if (digitalRead(buttonPin) == LOW) {
+      pinPress = true;
+    }
+  }
+  if (pinPress) { // AUSTIN put this HIGH
     if (millis() - lastButtonPressMs >= debounceDelayMs) {
         lastButtonPressMs = millis();
         
-        if (deviceConnected) {
+        if (deviceConnected == 1) {
             Serial.println("Button pressed: Sending Protobuf Event Notification...");
             
             // Send a test EventNotification protobuf packet over BLE
-            notifyPhoneOfEvent(
+            notify_phone_of_event(
                 11,                           // event_id
                 static_cast<uint32_t>(distanceInch * 2.54f), // distance_cm
                 millis(),                                // time_offset_ms
@@ -738,12 +760,32 @@ void loop() {
             ); // */
             // /*
             // Test image transfer over proto
-            runTransferTest(11, false);
+            runTransferTest((uint32_t)11, (uint8_t)0);
             // */
         } else {
             Serial.println("Button pressed, but BLE is not connected!");
         }
     }
   }
-  handlePendingBluetoothTasks();
+  handle_pending_bluetooth_tasks();
 }
+
+
+// TODO this is only as a helper so we should delete it
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void serial_print(const char* str) {
+    if (Serial) {
+        Serial.println(str);
+    }
+}
+
+bool bleInUse(void) { return true; }
+bool btInUse(void) { return true; }
+
+#ifdef __cplusplus
+}
+#endif
+
