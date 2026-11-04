@@ -213,3 +213,93 @@ uint8_t remove_dir_recursive(const char *path) {
 
   return success;
 }
+
+/**
+ * Extracts the millisecond timestamp from an image title string.
+ * Supports formats like: image-4141ms.jpg, image-start-4141ms.jpg, image-approach-4141ms.jpg
+ */
+uint8_t get_ms_from_image_title(const char *filename, uint32_t *out_ms) {
+    if (!filename || !out_ms) return FALSE;
+
+    // Look for the "ms.jpg" suffix
+    const char *msPtr = strstr(filename, "ms.jpg");
+    if (!msPtr) {
+        return FALSE;
+    }
+
+    // Walk backwards from "ms" to isolate the numeric characters
+    const char *p = msPtr - 1;
+    while (p >= filename && *p >= '0' && *p <= '9') {
+        p--;
+    }
+    
+    // If no digits were found right before "ms"
+    if (p == msPtr - 1) {
+        return FALSE;
+    }
+
+    *out_ms = (uint32_t)strtoul(p + 1, NULL, 10);
+    return TRUE;
+}
+
+/**
+ * Reads an incident's data.csv file line-by-line to match the timestamp and pull sensor data.
+ */
+ uint8_t match_timestamp_in_csv(const char *incident_folder_path, uint32_t target_ms, float *out_distance) {
+  char csvPath[MAX_PATH_LEN];
+  snprintf(csvPath, sizeof(csvPath), "%s/data.csv", incident_folder_path);
+
+  FILE *file = fopen(csvPath, "r");
+  if (file == NULL) {
+    ESP_LOGW(TAG, "Failed to open CSV file: %s", csvPath);
+    return FALSE;
+  }
+
+  char lineBuffer[64];
+  uint8_t found = false;
+
+  while (fgets(lineBuffer, sizeof(lineBuffer), file) != NULL) {
+    uint32_t rowTimestamp = 0;
+    float rowDistance = 0.0f;
+
+    if (sscanf(lineBuffer, "%lu,%f", &rowTimestamp, &rowDistance) == 2) {
+      if (rowTimestamp == target_ms) {
+        *out_distance = rowDistance;
+        found = TRUE;
+        break;
+      }
+    }
+  }
+  fclose(file);
+  return found;
+ }
+
+/**
+ * Scans an incident folder using POSIX VFS to parse image timestamps 
+ * and match them against the incident's meta information.
+ */
+uint8_t parse_incident_metadata(const char *incidentFolderPath) {
+    char csvPath[MAX_PATH_LEN];
+    snprintf(csvPath, sizeof(csvPath), "%s/data.csv", incidentFolderPath);
+
+    DIR *dir = opendir(incidentFolderPath);
+    if (dir == NULL) {
+        ESP_LOGW(TAG, "Failed to open incident folder: %s", incidentFolderPath);
+        return FALSE;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        // Check if the file is a JPEG image
+        if (entry->d_type == DT_REG && strstr(entry->d_name, ".jpg") != NULL) {
+            uint32_t imgMs = 0;
+            if (get_ms_from_image_title(entry->d_name, &imgMs)) {
+                ESP_LOGI(TAG, "Found image: %s -> Extracted Timestamp: %lu ms", entry->d_name, imgMs);
+                
+                // TODO: From here open data.csv and match rowTimestamp == imgMs
+            }
+        }
+    }
+    closedir(dir);
+    return TRUE;
+}
