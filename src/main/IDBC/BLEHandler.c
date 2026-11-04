@@ -571,9 +571,6 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
         } else {
           ESP_LOGE(TAG, "[SD ERROR] Failed to delete folder. Files may still be active or locked.");
         }
-      } else {
-        ESP_LOGW(TAG, "[BLE WARNING] Received ACK for Event ID %lu, but it wasn't found.", ack->event_id);
-      }
       break;
     }
 
