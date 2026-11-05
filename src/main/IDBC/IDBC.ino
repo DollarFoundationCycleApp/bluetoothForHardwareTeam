@@ -658,6 +658,10 @@ if (AUSTIN_COMPILES == 0) {
   // setup initial folder
   folderInitialization(); // initialization for the folder containing all incidents and data "RecordedData#" This should happen everytime the device is powered on.
   Serial.println("Folder initialized"); // j2 added remove later
+
+  // T#114 test: Parse image timestamps from an incident folder.
+  parse_incident_metadata("/incident1");
+
   storageQueue = xQueueCreate(512, sizeof(StorageCmd));
 
   detector_set_chunk_start_callback(on_chunk_start);
@@ -780,6 +784,37 @@ void serial_print(const char* str) {
     if (Serial) {
         Serial.println(str);
     }
+}
+
+/*
+ * Helper for scanning directory. Can move to IncidentManager once it's .cpp.
+ */
+void scan_incident_directory(const char *incidentFolderPath) {
+    File dir = SD.open(incidentFolderPath);
+
+    if (!dir || !dir.isDirectory()) {
+        return;
+    }
+
+    File entry = dir.openNextFile();
+
+    while (entry) {
+        const char *filename = entry.name();
+
+        if (!entry.isDirectory() && strstr(filename, ".jpg") != NULL) {
+            uint32_t imgMs = 0;
+
+            if (get_ms_from_image_title(filename, &imgMs)) {
+                // Timestamp successfully extracted.
+                // T#115 will use this value to find matching CSV data.
+            }
+        }
+
+        entry.close();
+        entry = dir.openNextFile();
+    }
+
+    dir.close();
 }
 
 bool bleInUse(void) { return true; }

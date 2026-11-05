@@ -800,12 +800,19 @@ static void start_advertising(void) {
     if (!ble_is_synced) return;
 
     serial_print("[BLE Debug] Entering start_advertising()");
-    
     ble_gap_adv_stop();
 
+    const char *deviceName = DEVICE_NAME;
+    uint8_t nameLength = strlen(deviceName);
+
     uint8_t adv_data[] = {
-        2, 0x01, 0x06 // Flags: General Discoverable, BR/EDR Unsupported
+        2, 0x01, 0x06, // Flags: General Discoverable, BR/EDR Unsupported
+        (uint8_t)(nameLength + 1),
+        0x09
     };
+
+    memcpy(&adv_data[5], deviceName, nameLength);
+
 
     int rc = ble_gap_adv_set_data(adv_data, sizeof(adv_data));
     if (rc != 0) {

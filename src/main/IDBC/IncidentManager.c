@@ -8,6 +8,7 @@
 #include "esp_log.h"
 
 #define TAG "INCIDENT_MANAGER"
+extern void serial_print(const char* str);
 
 // Global Linked List Head Pointer
 IncidentNode* pendingIncidentsHead = NULL;
@@ -218,27 +219,48 @@ uint8_t remove_dir_recursive(const char *path) {
  * Extracts the millisecond timestamp from an image title string.
  * Supports formats like: image-4141ms.jpg, image-start-4141ms.jpg, image-approach-4141ms.jpg
  */
+
 uint8_t get_ms_from_image_title(const char *filename, uint32_t *out_ms) {
-    if (!filename || !out_ms) return FALSE;
+    if (filename == NULL || out_ms == NULL) {
+        return FALSE;
+    }
 
-    // Look for the "ms.jpg" suffix
+    // Locate the timestamp suffix.
     const char *msPtr = strstr(filename, "ms.jpg");
-    if (!msPtr) {
+    if (msPtr == NULL || strcmp(msPtr, "ms.jpg") != 0) {
         return FALSE;
     }
 
-    // Walk backwards from "ms" to isolate the numeric characters
-    const char *p = msPtr - 1;
-    while (p >= filename && *p >= '0' && *p <= '9') {
-        p--;
+    // Find the beginning of the digits without moving
+    // outside the filename buffer.
+    const char *digitsStart = msPtr;
+
+    while (digitsStart > filename &&
+           digitsStart[-1] >= '0' &&
+           digitsStart[-1] <= '9') {
+        digitsStart--;
     }
-    
-    // If no digits were found right before "ms"
-    if (p == msPtr - 1) {
+
+    // Make sure at least one digit was found.
+    if (digitsStart == msPtr) {
         return FALSE;
     }
 
-    *out_ms = (uint32_t)strtoul(p + 1, NULL, 10);
+    // Convert the digits into a uint32_t.
+    uint32_t timestamp = 0;
+
+    for (const char *p = digitsStart; p < msPtr; p++) {
+        uint32_t digit = (uint32_t)(*p - '0');
+
+        // Prevent integer overflow.
+        if (timestamp > (UINT32_MAX - digit) / 10U) {
+            return FALSE;
+        }
+
+        timestamp = timestamp * 10U + digit;
+    }
+
+    *out_ms = timestamp;
     return TRUE;
 }
 
@@ -246,6 +268,10 @@ uint8_t get_ms_from_image_title(const char *filename, uint32_t *out_ms) {
  * Reads an incident's data.csv file line-by-line to match the timestamp and pull sensor data.
  */
  uint8_t match_timestamp_in_csv(const char *incident_folder_path, uint32_t target_ms, float *out_distance) {
+  if (incident_folder_path == NULL || out_distance == NULL) {
+    return FALSE;
+}
+  
   char csvPath[MAX_PATH_LEN];
   snprintf(csvPath, sizeof(csvPath), "%s/data.csv", incident_folder_path);
 
@@ -279,27 +305,11 @@ uint8_t get_ms_from_image_title(const char *filename, uint32_t *out_ms) {
  * and match them against the incident's meta information.
  */
 uint8_t parse_incident_metadata(const char *incidentFolderPath) {
-    char csvPath[MAX_PATH_LEN];
-    snprintf(csvPath, sizeof(csvPath), "%s/data.csv", incidentFolderPath);
-
-    DIR *dir = opendir(incidentFolderPath);
-    if (dir == NULL) {
-        ESP_LOGW(TAG, "Failed to open incident folder: %s", incidentFolderPath);
+    if (incidentFolderPath == NULL) {
+        serial_print("Folder path is NULL");
         return FALSE;
     }
 
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        // Check if the file is a JPEG image
-        if (entry->d_type == DT_REG && strstr(entry->d_name, ".jpg") != NULL) {
-            uint32_t imgMs = 0;
-            if (get_ms_from_image_title(entry->d_name, &imgMs)) {
-                ESP_LOGI(TAG, "Found image: %s -> Extracted Timestamp: %lu ms", entry->d_name, imgMs);
-                
-                // TODO: From here open data.csv and match rowTimestamp == imgMs
-            }
-        }
-    }
-    closedir(dir);
+    scan_incident_directory(incidentFolderPath);
     return TRUE;
 }
