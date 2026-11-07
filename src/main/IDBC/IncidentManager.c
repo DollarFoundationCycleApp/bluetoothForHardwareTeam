@@ -351,3 +351,58 @@ uint8_t parse_incident_metadata(const char *incidentFolderPath) {
     scan_incident_directory(incidentFolderPath);
     return TRUE;
 }
+
+/**
+ * Picks the incident's approach image (or the start image if there isn't one),
+ * reads its ms from the filename, and looks up the distance at that ms
+ * in data.csv. Returns the distance in cm and the image's ms.
+ */
+uint8_t get_incident_event_metadata(const char *incident_folder_path, uint32_t *out_distance_cm, uint32_t *out_ms) {
+  if (incident_folder_path == NULL || out_distance_cm == NULL || out_ms == NULL) {
+    return FALSE;
+  }
+
+  DIR *dir = opendir(incident_folder_path);
+  if (dir == NULL) {
+    ESP_LOGW(TAG, "Failed to open incident folder: %s", incident_folder_path);
+    return FALSE;
+  }
+
+  uint8_t haveApproach = FALSE, haveStart = FALSE;
+  uint32_t approachMs = 0, startMs = 0;
+  struct dirent *entry;
+
+  while ((entry = readdir(dir)) != NULL) {
+    if (entry->d_type != DT_REG) continue;
+
+    uint32_t ms = 0;
+    if (!get_ms_from_image_title(entry->d_name, &ms)) continue;
+
+    if (strncmp(entry->d_name, "image-approach-", 15) == 0) {
+      approachMs = ms;
+      haveApproach = TRUE;
+    } else if (strncmp(entry->d_name, "image-start-", 12) == 0) {
+      startMs = ms;
+      haveStart = TRUE;
+    }
+  }
+  closedir(dir);
+
+  uint32_t eventMs;
+  if (haveApproach) {
+    eventMs = approachMs;
+  } else if (haveStart) {
+    eventMs = startMs;
+  } else {
+    return FALSE;
+  }
+
+  float distInch = 0.0f;
+  if (!match_timestamp_in_csv(incident_folder_path, eventMs, &distInch)) {
+    return FALSE;
+  }
+
+  *out_distance_cm = (uint32_t)(distInch * 2.54f + 0.5f);
+  *out_ms = eventMs;
+  return TRUE;
+}

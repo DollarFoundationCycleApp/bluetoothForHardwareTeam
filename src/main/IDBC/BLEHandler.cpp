@@ -9,6 +9,7 @@
 #include "IBDC_v0.3.2.pb.h"
 
 #include "esp_bt.h"
+#include "esp_timer.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -627,13 +628,21 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
         closedir(dir);
       }
 
-      notify_phone_of_event(
-        infoReq->event_id,
-        100,
-        -100,
-        imgCount,
-        IDBC_ImageFormat_IMAGE_FORMAT_JPEG
-      );
+      // T#116 (assumption, pending confirmation): metadata comes from the approach image
+      // (start image if none): distance at that image's ms, time offset = time since that ms.
+      uint32_t distanceCm = 0;
+      uint32_t timeOffsetMs = 0;
+      uint32_t eventMs = 0;
+
+      if (get_incident_event_metadata(targetFolder, &distanceCm, &eventMs)) {
+        uint32_t nowMs = (uint32_t)(esp_timer_get_time() / 1000ULL);  // same stopwatch as millis()
+        timeOffsetMs = (nowMs > eventMs) ? (nowMs - eventMs) : 0;
+      } else {
+        ESP_LOGW(TAG, "[BLE WARNING] No image metadata for event %lu", (unsigned long)infoReq->event_id);
+      }
+
+      ESP_LOGI(TAG, "[T#116] event %lu: distance=%lu cm, offset=%lu ms", (unsigned long)infoReq->event_id, (unsigned long)distanceCm, (unsigned long)timeOffsetMs);
+      notify_phone_of_event(infoReq->event_id, distanceCm, timeOffsetMs, imgCount, IDBC_ImageFormat_IMAGE_FORMAT_JPEG);
       break;
     }
 
