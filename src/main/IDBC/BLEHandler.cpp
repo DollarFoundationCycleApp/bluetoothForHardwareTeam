@@ -628,8 +628,8 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
         closedir(dir);
       }
 
-      // T#116 (assumption, pending confirmation): metadata comes from the approach image
-      // (start image if none): distance at that image's ms, time offset = time since that ms.
+      // Metadata comes from the approach image (start image if none):
+      // distance at that image's ms, time offset = time since that ms.
       uint32_t distanceCm = 0;
       uint32_t timeOffsetMs = 0;
       uint32_t eventMs = 0;
@@ -643,6 +643,13 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
 
       ESP_LOGI(TAG, "[T#116] event %lu: distance=%lu cm, offset=%lu ms", (unsigned long)infoReq->event_id, (unsigned long)distanceCm, (unsigned long)timeOffsetMs);
       notify_phone_of_event(infoReq->event_id, distanceCm, timeOffsetMs, imgCount, IDBC_ImageFormat_IMAGE_FORMAT_JPEG);
+      break;
+    }
+
+    case IDBC_AppToDevice_settings_tag: {
+      imagesPerEventSetting = appCmd->payload.settings.images_per_event;
+      ESP_LOGI(TAG, "Settings received: images_per_event=%lu", (unsigned long)imagesPerEventSetting);
+      // TODO (future dev team): apply the setting
       break;
     }
 
