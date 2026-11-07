@@ -83,6 +83,7 @@ QueueHandle_t bleImageReqQueue = NULL;
 char recentDevices[MAX_SAVED_DEVICES][MAC_STR_LEN]; 
 int savedDeviceCount = 0;
 uint16_t tx_val_handle = 0;
+static uint32_t imagesPerEventSetting = 0;
 
 // Minimal HID Keyboard Report Descriptor (Enables OS-level phone pairing)
 static const uint8_t hidReportDescriptor[] = {
@@ -670,6 +671,8 @@ void notify_phone_of_event(uint32_t eventId, uint32_t distanceCm, uint32_t timeO
   msg.payload.event_notification.time_offset_ms = timeOffsetMs;
   msg.payload.event_notification.image_count = imageCount;
   msg.payload.event_notification.image_format = (IDBC_ImageFormat)format;
+  // Clock request: disabled until new protocol is approved
+  // msg.payload.event_notification.has_app_time_request = true;
 
   send_device_to_app_response(&msg);
 }
