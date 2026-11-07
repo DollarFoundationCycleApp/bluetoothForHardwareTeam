@@ -802,21 +802,16 @@ static void start_advertising(void) {
     serial_print("[BLE Debug] Entering start_advertising()");
     ble_gap_adv_stop();
 
-    const char *deviceName = DEVICE_NAME;
-    uint8_t nameLength = strlen(deviceName);
+    struct ble_hs_adv_fields fields;
+    std::memset(&fields, 0, sizeof(fields));
+    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+    fields.name = (uint8_t *)DEVICE_NAME;
+    fields.name_len = strlen(DEVICE_NAME);
+    fields.name_is_complete = 1;
 
-    uint8_t adv_data[] = {
-        2, 0x01, 0x06, // Flags: General Discoverable, BR/EDR Unsupported
-        (uint8_t)(nameLength + 1),
-        0x09
-    };
-
-    memcpy(&adv_data[5], deviceName, nameLength);
-
-
-    int rc = ble_gap_adv_set_data(adv_data, sizeof(adv_data));
+    int rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
-        ESP_LOGE(TAG, "[BLE Error] Failed to set adv data, rc = %d", rc);
+        ESP_LOGE(TAG, "[BLE Error] Failed to set adv fields, rc = %d", rc);
         return;
     }
 
