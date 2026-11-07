@@ -2,12 +2,14 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <inttypes.h>
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include "esp_log.h"
 
 #define TAG "INCIDENT_MANAGER"
+#define CSV_MATCH_TOLERANCE_MS 100   // rows are ~20-55 ms apart
 extern void serial_print(const char* str);
 
 // Global Linked List Head Pointer
@@ -264,14 +266,16 @@ uint8_t get_ms_from_image_title(const char *filename, uint32_t *out_ms) {
     return TRUE;
 }
 
+
 /**
- * Reads an incident's data.csv file line-by-line to match the timestamp and pull sensor data.
+ * Reads an incident's data.csv and returns the distance from the row whose
+ * timestamp is closest to target_ms (within CSV_MATCH_TOLERANCE_MS).
  */
- uint8_t match_timestamp_in_csv(const char *incident_folder_path, uint32_t target_ms, float *out_distance) {
+uint8_t match_timestamp_in_csv(const char *incident_folder_path, uint32_t target_ms, float *out_distance) {
   if (incident_folder_path == NULL || out_distance == NULL) {
     return FALSE;
-}
-  
+  }
+
   char csvPath[MAX_PATH_LEN];
   snprintf(csvPath, sizeof(csvPath), "%s/data.csv", incident_folder_path);
 
@@ -282,23 +286,57 @@ uint8_t get_ms_from_image_title(const char *filename, uint32_t *out_ms) {
   }
 
   char lineBuffer[64];
-  uint8_t found = false;
+  uint8_t found = FALSE;
+  uint32_t bestDiff = UINT32_MAX;
 
   while (fgets(lineBuffer, sizeof(lineBuffer), file) != NULL) {
-    uint32_t rowTimestamp = 0;
-    float rowDistance = 0.0f;
+    uint32_t rowTs = 0;
+    float rowDist = 0.0f;
 
-    if (sscanf(lineBuffer, "%lu,%f", &rowTimestamp, &rowDistance) == 2) {
-      if (rowTimestamp == target_ms) {
-        *out_distance = rowDistance;
-        found = TRUE;
-        break;
-      }
+    if (sscanf(lineBuffer, "%" SCNu32 ",%f", &rowTs, &rowDist) != 2) continue;
+
+    uint32_t diff = (rowTs > target_ms) ? (rowTs - target_ms) : (target_ms - rowTs);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      *out_distance = rowDist;
+      found = TRUE;
+    } else if (rowTs > target_ms) {
+      break;  // rows are in time order, so it only gets worse from here
     }
   }
   fclose(file);
-  return found;
- }
+
+  return (found && bestDiff <= CSV_MATCH_TOLERANCE_MS) ? TRUE : FALSE;
+}
+
+/*
+ * Helper for scanning directory. May need to be updated once we move to .cpp.
+ */
+void scan_incident_directory(const char *incidentFolderPath) {
+  DIR *dir = opendir(incidentFolderPath);
+  if (dir == NULL) {
+    serial_print("scan_incident_directory: failed to open folder");
+    return;
+  }
+
+  struct dirent *entry;
+  while ((entry = readdir(dir)) != NULL) {
+    if (entry->d_type != DT_REG || strstr(entry->d_name, ".jpg") == NULL) continue;
+
+    uint32_t imgMs = 0;
+    if (!get_ms_from_image_title(entry->d_name, &imgMs)) continue;
+
+    float distInch = 0.0f;
+    char msg[96];
+    if (match_timestamp_in_csv(incidentFolderPath, imgMs, &distInch)) {
+      snprintf(msg, sizeof(msg), "%s -> %lu ms, %.2f in", entry->d_name, (unsigned long)imgMs, distInch);
+    } else {
+      snprintf(msg, sizeof(msg), "%s -> %lu ms, no CSV match", entry->d_name, (unsigned long)imgMs);
+    }
+    serial_print(msg);
+  }
+  closedir(dir);
+}
 
 /**
  * Scans an incident folder using POSIX VFS to parse image timestamps 

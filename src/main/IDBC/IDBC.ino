@@ -659,8 +659,8 @@ if (AUSTIN_COMPILES == 0) {
   folderInitialization(); // initialization for the folder containing all incidents and data "RecordedData#" This should happen everytime the device is powered on.
   Serial.println("Folder initialized"); // j2 added remove later
 
-  // T#114 test: Parse image timestamps from an incident folder.
-  parse_incident_metadata("/incident1");
+  // T#114&115 test: Parse metadata from an incident folder.
+  parse_incident_metadata("/sd/incident1");
 
   storageQueue = xQueueCreate(512, sizeof(StorageCmd));
 
@@ -789,6 +789,7 @@ void serial_print(const char* str) {
 /*
  * Helper for scanning directory. Can move to IncidentManager once it's .cpp.
  */
+ /*
 void scan_incident_directory(const char *incidentFolderPath) {
     File dir = SD.open(incidentFolderPath);
 
@@ -815,7 +816,7 @@ void scan_incident_directory(const char *incidentFolderPath) {
     }
 
     dir.close();
-}
+}*/
 
 bool bleInUse(void) { return true; }
 bool btInUse(void) { return true; }
