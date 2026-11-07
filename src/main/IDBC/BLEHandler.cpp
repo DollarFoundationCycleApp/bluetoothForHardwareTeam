@@ -654,6 +654,16 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
       break;
     }
 
+    // Clock response stub: disabled until the time sync protocol is approved
+    // (needs the v0.3.3 generated files)
+    /*
+    case IDBC_AppToDevice_app_time_response_tag: {
+      const IDBC_AppTimeResponse* t = &appCmd->payload.app_time_response;
+      ESP_LOGI(TAG, "App time: %02lu:%02lu:%02lu",
+              (unsigned long)t->hour24, (unsigned long)t->minute, (unsigned long)t->second);
+      break;
+    }*/
+
     default:
       break;
   }
