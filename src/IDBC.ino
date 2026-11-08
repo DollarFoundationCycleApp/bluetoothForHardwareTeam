@@ -1,6 +1,7 @@
 // libraries
 #include <Arduino.h>
 #include <esp_camera.h>
+#include "esp_log.h" // jacob added for sanity
 #include <FS.h>
 #include <SD.h>
 #include <SPI.h>
@@ -89,7 +90,7 @@ void errorFlash() {
 // SD card variables
 bool sd_status = false;
 
-char folderPath[] = "/RecordedData1";
+char folderPath[32] = "/RecordedData1";
 
 // Incident counter (only written by storageTask on Core 0)
 int incidentCount = 0;
@@ -249,7 +250,7 @@ void folderInitialization() {
     // 0 1 2 3 4 5 6 7 8 9 10 11 12 13
     int folderNumber = atoi(&folderPath[13]);
     folderNumber++;
-    sprintf(&folderPath[13], "%d", folderNumber);
+    snprintf(folderPath, sizeof(folderPath), "/RecordedData%d", folderNumber);
     //esp_task_wdt_reset(); // J2 added for when folder is 100+
     yield();
   }
@@ -261,7 +262,7 @@ void folderInitialization() {
 // Format: timestamp_ms,LEVEL,message
 void writeLog(uint32_t timestamp, const char *level, const char *msg) {
   char logPath[48];
-  sprintf(logPath, "%s/log.csv", folderPath);
+  snprintf(logPath, sizeof(logPath), "%s/log.csv", folderPath);
   File logFile = SD.open(logPath, FILE_APPEND);
   if (!logFile) return;
   char line[96];
@@ -294,8 +295,8 @@ static void flushChunkToMainFolder() {
   if (!chunkPending) return;
 
   if (chunkPhotoBuf) {
-    char path[120];
-    sprintf(path, "%s/image-start-%lums.jpg", folderPath, chunkPhotoTs);
+    char path[160];
+    snprintf(path, sizeof(path), "%s/image-start-%lums.jpg", folderPath, chunkPhotoTs);
     if (!writeFile(SD, path, chunkPhotoBuf, chunkPhotoLen)) {
       writeLog(millis(), "ERR", "chunk start-photo flush failed");
     }
@@ -305,8 +306,8 @@ static void flushChunkToMainFolder() {
   }
 
   if (potentialPhotoBuf) {
-    char path[120];
-    sprintf(path, "%s/image-approach-%lums.jpg", folderPath, potentialPhotoTs);
+    char path[160];
+    snprintf(path, sizeof(path), "%s/image-approach-%lums.jpg", folderPath, potentialPhotoTs);
     if (!writeFile(SD, path, potentialPhotoBuf, potentialPhotoLen)) {
       writeLog(millis(), "ERR", "chunk approach-photo flush failed");
     }
@@ -373,9 +374,9 @@ void storageTask(void *pvParameters) {
             size_t periodicLen;
             uint8_t *periodicBuf = photo_capture(&periodicLen);
             if (periodicBuf) {
-              char periodicPath[120];
-              sprintf(periodicPath, "%s/image-%lums.jpg", folderPath,
-                      cmd.measurement.timestamp);
+              char periodicPath[160];
+              snprintf(periodicPath, sizeof(periodicPath), "%s/image-%lums.jpg", folderPath,
+                       cmd.measurement.timestamp);
               if (!writeFile(SD, periodicPath, periodicBuf, periodicLen)) {
                 writeLog(millis(), "ERR", "periodic photo write failed");
               }
@@ -443,8 +444,8 @@ void storageTask(void *pvParameters) {
 
           // Save the chunk-start photo (vehicle first appeared)
           if (chunkPhotoBuf) {
-            char photoPath[120];
-            sprintf(photoPath, "%s/image-start-%lums.jpg", incidentPath, chunkPhotoTs);
+            char photoPath[160];
+            snprintf(photoPath, sizeof(photoPath), "%s/image-start-%lums.jpg", incidentPath, chunkPhotoTs);
             if (!writeFile(SD, photoPath, chunkPhotoBuf, chunkPhotoLen)) {
               writeLog(millis(), "ERR", "incident start-photo write failed");
             }
@@ -457,8 +458,8 @@ void storageTask(void *pvParameters) {
 
           // Save the closest-approach photo (vehicle fully in frame)
           if (potentialPhotoBuf) {
-            char photoPath[120];
-            sprintf(photoPath, "%s/image-approach-%lums.jpg", incidentPath, potentialPhotoTs);
+            char photoPath[160];
+            snprintf(photoPath, sizeof(photoPath), "%s/image-approach-%lums.jpg", incidentPath, potentialPhotoTs);
             if (!writeFile(SD, photoPath, potentialPhotoBuf, potentialPhotoLen)) {
               writeLog(millis(), "ERR", "incident approach-photo write failed");
             }
@@ -471,8 +472,8 @@ void storageTask(void *pvParameters) {
 
           // Save chunk measurements to a per-incident CSV (one open, many writes, one close)
           if (chunkMsmts && chunkMsmtCount > 0) {
-            char incidentCsvPath[120];
-            sprintf(incidentCsvPath, "%s/data.csv", incidentPath);
+            char incidentCsvPath[160];
+            snprintf(incidentCsvPath, sizeof(incidentCsvPath), "%s/data.csv", incidentPath);
             File incidentCsvFile = SD.open(incidentCsvPath, FILE_WRITE);
             if (incidentCsvFile) {
               for (int i = 0; i < chunkMsmtCount; i++) {
@@ -575,7 +576,7 @@ void errorBlink() {
 
 void setup() {
   Serial.begin(115200); // Starts the serial communication
-
+  esp_log_level_set("cam_hal", ESP_LOG_ERROR); // jacob added for sanity and to read console
   // Increase the Task Watchdog timeout from the default 5s to 30s.
   // Incident saves write multiple large JPEGs to SD sequentially; even with
   // yields between them, a slow card can take several seconds per file.
@@ -658,7 +659,7 @@ if (AUSTIN_COMPILES == 0) {
   // setup initial folder
   folderInitialization(); // initialization for the folder containing all incidents and data "RecordedData#" This should happen everytime the device is powered on.
   Serial.println("Folder initialized"); // j2 added remove later
-  storageQueue = xQueueCreate(512, sizeof(StorageCmd));
+  storageQueue = xQueueCreate(1024, sizeof(StorageCmd));
 
   detector_set_chunk_start_callback(on_chunk_start);
   detector_set_potential_callback(on_potential_event);
@@ -776,7 +777,7 @@ void loop() {
 extern "C" {
 #endif
 
-void serial_print(const char* str) {
+extern "C" void serial_print(const char* str) {
     if (Serial) {
         Serial.println(str);
     }

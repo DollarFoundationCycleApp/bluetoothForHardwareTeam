@@ -1,2 +1,0 @@
-compiler.cpp.extra_flags=-std=gnu++17
-compiler.c.extra_flags=-DCONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=6144

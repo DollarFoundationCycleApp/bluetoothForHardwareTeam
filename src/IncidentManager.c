@@ -12,9 +12,79 @@
 // Global Linked List Head Pointer
 IncidentNode* pendingIncidentsHead = NULL;
 
+extern void serial_print(const char* str); // update this before prod
+
+#define ESP_LOGI(tag, format, ...) { char buf[360]; snprintf(buf, sizeof(buf), "[INFO] " format, ##__VA_ARGS__); serial_print(buf); }
+#define ESP_LOGW(tag, format, ...) { char buf[360]; snprintf(buf, sizeof(buf), "[WARN] " format, ##__VA_ARGS__); serial_print(buf); }
+#define ESP_LOGE(tag, format, ...) { char buf[360]; snprintf(buf, sizeof(buf), "[ERROR] " format, ##__VA_ARGS__); serial_print(buf); }
+
 /**
-* Scan and populate the linked list queue from SD card using POSIX VFS
-*/
+ * Helper function to securely build child paths without buffer overflow or truncation
+ */
+static uint8_t build_child_path(char *dest, size_t dest_size, const char *parent, const char *child) {
+  size_t parent_len = strlen(parent);
+  size_t child_len = strlen(child);
+  size_t prefix_len = parent_len;
+  size_t separator_len = parent_len > 0 && parent[parent_len - 1] != '/' ? 1 : 0;
+
+  if (parent_len == 0) {
+    dest[0] = '/';
+    prefix_len = 1;
+  } else if (parent_len == 1 && parent[0] == '/') {
+    prefix_len = 1;
+  }
+
+  if (prefix_len + separator_len + child_len + 1 > dest_size) {
+    return FALSE;
+  }
+
+  if (parent_len > 0) {
+    memcpy(dest, parent, prefix_len);
+  }
+  if (separator_len > 0) {
+    dest[prefix_len++] = '/';
+  }
+  memcpy(dest + prefix_len, child, child_len + 1);
+  return TRUE;
+}
+
+/**
+ * Internal helper to safely insert or queue an incident node
+ */
+static void add_incident_to_list(uint32_t eventId, const char* fullPath) {
+  if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    uint8_t alreadyExists = FALSE;
+    IncidentNode* current = pendingIncidentsHead;
+    while (current != NULL) {
+      if (current->eventId == eventId) {
+        alreadyExists = TRUE;
+        break;
+      }
+      current = current->next;
+    }
+
+    if (alreadyExists == FALSE) {
+      IncidentNode* newNode = (IncidentNode*)malloc(sizeof(IncidentNode));
+      if (newNode != NULL) {
+        newNode->eventId = eventId;
+        snprintf(newNode->folderPath, MAX_PATH_LEN, "%s", fullPath);
+        newNode->active = TRUE;
+        
+        newNode->next = pendingIncidentsHead;
+        pendingIncidentsHead = newNode;
+
+        ESP_LOGI(TAG, "Queued incident folder: %s [EventId: %lu]", fullPath, eventId);
+      } else {
+        ESP_LOGE(TAG, "Malloc failed for new incident node!");
+      }
+    }
+    xSemaphoreGive(incidentMutex);
+  }
+}
+
+/**
+ * Scan and populate the linked list queue from SD card using POSIX VFS
+ */
 void queue_incident_folders(const char* baseFolderPath) {
   DIR *dir = opendir(baseFolderPath);
   if (dir == NULL) {
@@ -23,63 +93,35 @@ void queue_incident_folders(const char* baseFolderPath) {
   }
 
   struct dirent *entry;
-  int countAdded = 0;
-
   while ((entry = readdir(dir)) != NULL) {
-    if (entry->d_type == DT_DIR && strncmp(entry->d_name, "incident", 8) == 0) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+
+    // Match folders starting with "incident" safely using strncasecmp
+    if (strncasecmp(entry->d_name, "incident", 8) == 0) {
       char fullPath[MAX_PATH_LEN];
-      if (strcmp(baseFolderPath, "/") == 0 || strlen(baseFolderPath) == 0) {
-        snprintf(fullPath, sizeof(fullPath), "/%s", entry->d_name);
-      } else {
-        if (baseFolderPath[strlen(baseFolderPath) - 1] == '/') {
-          snprintf(fullPath, sizeof(fullPath), "%s%s", baseFolderPath, entry->d_name);
-        } else {
-          snprintf(fullPath, sizeof(fullPath), "%s/%s", baseFolderPath, entry->d_name);
+      if (build_child_path(fullPath, sizeof(fullPath), baseFolderPath, entry->d_name)) {
+        
+        DIR *subDir = opendir(fullPath);
+        if (subDir != NULL) {
+          closedir(subDir);
+          
+          // Parse the trailing digits
+          uint32_t eventId = (uint32_t)strtoul(entry->d_name + 8, NULL, 10);
+          add_incident_to_list(eventId, fullPath);
         }
-      }
-      
-      uint32_t eventId = (uint32_t)strtoul(entry->d_name + 8, NULL, 10);
-
-      if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        // Check if already in the linked list
-        uint8_t alreadyExists = FALSE;
-        IncidentNode* current = pendingIncidentsHead;
-        while (current != NULL) {
-          if (current->eventId == eventId) {
-            alreadyExists = TRUE;
-            break;
-          }
-          current = current->next;
-        }
-
-        if (alreadyExists == FALSE) {
-          // Allocate a new node on the heap (low memory, exact fit)
-          IncidentNode* newNode = (IncidentNode*)malloc(sizeof(IncidentNode));
-          if (newNode != NULL) {
-            newNode->eventId = eventId;
-            snprintf(newNode->folderPath, MAX_PATH_LEN, "%s", fullPath);
-            
-            // Prepend for quick O(1) insertion
-            newNode->next = pendingIncidentsHead;
-            pendingIncidentsHead = newNode;
-
-            countAdded++;
-            ESP_LOGI(TAG, "Queued incident folder: %s [EventId: %lu]", fullPath, eventId);
-          } else {
-            ESP_LOGE(TAG, "[ERROR] Malloc failed for new incident node!");
-          }
-        }
-        xSemaphoreGive(incidentMutex);
       }
     }
   }
   closedir(dir);
-  ESP_LOGI(TAG, "Scan complete. Added this pass. Total count: %d", get_pending_incident_count());
+  ESP_LOGI(TAG, "Scan complete for %s. Total count: %d", baseFolderPath, get_pending_incident_count());
 }
+ 
 
 /**
-* Removes and frees a specific node from the linked list by Event ID (used during ACK cleanup)
-*/
+ * Removes and frees a specific node from the linked list by Event ID (used during ACK cleanup)
+ */
 uint8_t remove_incident_node(uint32_t event_id) {
   uint8_t removed = FALSE;
   if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -115,7 +157,7 @@ void refresh_list(void) {
     IncidentNode* current = pendingIncidentsHead;
     while (current != NULL) {
       IncidentNode* nextNode = current->next;
-      free(current); // Release each node's memory
+      free(current);
       current = nextNode;
     }
     pendingIncidentsHead = NULL;
@@ -187,8 +229,11 @@ uint8_t remove_dir_recursive(const char *path) {
     if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
       continue;
     }
-
-    snprintf(filePath, sizeof(filePath), "%s/%s", path, entry->d_name);
+    if (!build_child_path(filePath, sizeof(filePath), path, entry->d_name)) {
+      ESP_LOGE(TAG, "Path is too long under directory");
+      success = FALSE;
+      continue;
+    }
 
     struct stat st;
     if (stat(filePath, &st) == 0) {

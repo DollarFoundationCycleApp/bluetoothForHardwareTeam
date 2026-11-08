@@ -1,10 +1,6 @@
 #ifndef BLE_HANDLER_H
 #define BLE_HANDLER_H
 
-#if defined(__cplusplus)
-extern "C" {
-#endif
-
 #include <stdint.h>
 #include <stdbool.h>
 #include "freertos/FreeRTOS.h"
@@ -25,11 +21,13 @@ extern "C" {
 #endif
 
 // --- Shared Externs ---
-extern SemaphoreHandle_t incidentMutex;
-extern QueueHandle_t bleImageReqQueue;
 extern uint8_t deviceConnected;
 extern uint8_t deviceReady;
-
+#if defined(__cplusplus)
+extern "C" {
+#endif
+extern SemaphoreHandle_t incidentMutex;
+extern QueueHandle_t bleImageReqQueue;
 // --- Structs ---
 typedef struct {
     uint8_t active;
@@ -38,7 +36,9 @@ typedef struct {
     uint32_t startChunk;
     char targetFolder[64];
 } PendingImageRequest;
-
+#if defined(__cplusplus)
+}
+#endif
 // --- Function Prototypes ---
 
 /**
@@ -75,9 +75,5 @@ void notify_phone_of_event(uint32_t eventId, uint32_t distanceCm, uint32_t timeO
  * Test method to help run transfer acknowledgments
  */
 void runTransferTest(uint32_t num, uint8_t counter);
-
-#if defined(__cplusplus)
-}
-#endif
 
 #endif

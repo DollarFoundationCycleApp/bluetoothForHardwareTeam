@@ -11,6 +11,9 @@ extern "C" {
 #include <FS.h>
 #include <SD.h>
 
+#define TRUE  (uint8_t)1
+#define FALSE (uint8_t)0
+
 // 1. Define the struct where both files can see it
 struct IncidentMetadata {
     unsigned long eventId;
@@ -43,7 +46,7 @@ extern "C" {
 #include "freertos/semphr.h"
 
 #define MAX_PENDING_INCIDENTS 16
-#define MAX_PATH_LEN          64
+#define MAX_PATH_LEN          256
 
 #ifndef TRUE
 #define TRUE 1
@@ -65,7 +68,7 @@ typedef struct IncidentNode {
 extern SemaphoreHandle_t incidentMutex;
 extern IncidentNode* pendingIncidentsHead;
 
-// Function Prototypes
+// Function Prototypes (Pure C / POSIX VFS)
 void queue_incident_folders(const char* baseFolderPath);
 uint8_t remove_dir_recursive(const char *path);
 void refresh_list(void);

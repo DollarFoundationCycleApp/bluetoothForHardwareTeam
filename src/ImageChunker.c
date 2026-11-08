@@ -102,3 +102,33 @@ bool buildImageChunk(
 
     return true;
 }
+
+bool buildImageChunkFromWindow(
+    const uint8_t* windowData,
+    size_t dataSize,
+    uint32_t eventId,
+    uint32_t imageIndex,
+    uint32_t chunkSequence,
+    size_t totalChunks,
+    IDBC_ImageChunk* output) {
+    
+    if (windowData == NULL || output == NULL || dataSize == 0) {
+        return false;
+    }
+
+    // Start with an empty protobuf message.
+    *output = (IDBC_ImageChunk)IDBC_ImageChunk_init_default;
+
+    // Fill in metadata.
+    output->event_id = eventId;
+    output->image_index = imageIndex;
+    output->chunk_sequence = chunkSequence;
+    output->total_chunks = (uint32_t)totalChunks;
+    output->is_last_chunk = (chunkSequence == totalChunks - 1);
+
+    // Copy the exact bytes read from the sliding window file stream.
+    output->payload.size = (pb_size_t)dataSize;
+    memcpy(output->payload.bytes, windowData, dataSize);
+
+    return true;
+}
