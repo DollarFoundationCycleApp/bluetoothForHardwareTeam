@@ -440,7 +440,7 @@ void storageTask(void *pvParameters) {
 
           // Each writeFile call can take hundreds of ms on a slow SD card.
           // Yield between them so IDLE0 can run and reset the Task Watchdog.
-          vTaskDelay(pdMS_TO_TICKS(1));
+          vTaskDelay(pdMS_TO_TICKS(4));
 
           // Save the chunk-start photo (vehicle first appeared)
           if (chunkPhotoBuf) {
@@ -512,6 +512,7 @@ void storageTask(void *pvParameters) {
           break;
         }
       }
+      vTaskDelay(pdMS_TO_TICKS(5)); // yield so theres a chance ble can handle it.
     }
 
     // Flush the main CSV to SD once per second so data survives a crash
@@ -768,7 +769,7 @@ void loop() {
         }
     }
   }
-  handle_pending_bluetooth_tasks();
+  //handle_pending_bluetooth_tasks();
 }
 
 

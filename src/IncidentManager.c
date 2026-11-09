@@ -49,9 +49,9 @@ static uint8_t build_child_path(char *dest, size_t dest_size, const char *parent
 }
 
 /**
- * Internal helper to safely insert or queue an incident node
+ * Internal helper to safely insert or queue an incident node with a cached image count
  */
-static void add_incident_to_list(uint32_t eventId, const char* fullPath) {
+static void add_incident_to_list(uint32_t eventId, const char* fullPath, uint32_t imageCount) {
   if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
     uint8_t alreadyExists = FALSE;
     IncidentNode* current = pendingIncidentsHead;
@@ -68,12 +68,13 @@ static void add_incident_to_list(uint32_t eventId, const char* fullPath) {
       if (newNode != NULL) {
         newNode->eventId = eventId;
         snprintf(newNode->folderPath, MAX_PATH_LEN, "%s", fullPath);
+        newNode->imageCount = imageCount;
         newNode->active = TRUE;
         
         newNode->next = pendingIncidentsHead;
         pendingIncidentsHead = newNode;
 
-        ESP_LOGI(TAG, "Queued incident folder: %s [EventId: %lu]", fullPath, eventId);
+        ESP_LOGI(TAG, "Queued incident folder: %s [EventId: %lu, Images: %lu]", fullPath, eventId, (unsigned long)imageCount);
       } else {
         ESP_LOGE(TAG, "Malloc failed for new incident node!");
       }
@@ -105,11 +106,21 @@ void queue_incident_folders(const char* baseFolderPath) {
         
         DIR *subDir = opendir(fullPath);
         if (subDir != NULL) {
+          // Count images once during startup scan (avoiding runtime SD locks)
+          uint32_t imgCount = 0;
+          struct dirent *subEntry;
+          while ((subEntry = readdir(subDir)) != NULL) {
+            if (subEntry->d_type == DT_REG) {
+              if (strstr(subEntry->d_name, ".jpg") != NULL || strstr(subEntry->d_name, ".png") != NULL) {
+                imgCount++;
+              }
+            }
+          }
           closedir(subDir);
           
           // Parse the trailing digits
           uint32_t eventId = (uint32_t)strtoul(entry->d_name + 8, NULL, 10);
-          add_incident_to_list(eventId, fullPath);
+          add_incident_to_list(eventId, fullPath, imgCount);
         }
       }
     }
@@ -117,7 +128,6 @@ void queue_incident_folders(const char* baseFolderPath) {
   closedir(dir);
   ESP_LOGI(TAG, "Scan complete for %s. Total count: %d", baseFolderPath, get_pending_incident_count());
 }
- 
 
 /**
  * Removes and frees a specific node from the linked list by Event ID (used during ACK cleanup)
@@ -195,6 +205,7 @@ const char* find_target_path(uint32_t event_id) {
   }
   return targetBuffer;
 }
+
 
 /**
 * Helper to get total number of items currently in the linked list

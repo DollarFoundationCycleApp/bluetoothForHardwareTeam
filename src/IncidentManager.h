@@ -60,8 +60,9 @@ extern "C" {
 typedef struct IncidentNode {
     uint32_t eventId;
     char folderPath[MAX_PATH_LEN];
+    uint32_t imageCount; // Cached image count
     uint8_t active;
-    struct IncidentNode* next; // Pointer to the next incident node
+    struct IncidentNode* next;
 } IncidentNode;
 
 // Shared Globals

@@ -49,6 +49,10 @@ extern "C" void serial_print(const char* str);
 #define ESP_LOGE(tag, format, ...) { char buf[512]; snprintf(buf, sizeof(buf), "[ERROR] " format, ##__VA_ARGS__); serial_print(buf); }
 
 static uint8_t ble_is_synced = FALSE;
+typedef struct {
+  uint16_t len;
+  uint8_t data[512];
+} BleIncomingPacket;
 QueueHandle_t bleCmdQueue = NULL;
 
 // --- Custom UUIDs for Data/File Transfers (Little-Endian format for raw C structs) ---
@@ -185,39 +189,27 @@ static int tx_characteristic_access_cb(uint16_t conn_handle, uint16_t attr_handl
 }
 
 
+
 static int rx_characteristic_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                                      struct ble_gatt_access_ctxt *ctxt, void *arg) {
-  // Immediate entry check to verify data is hitting the callback
   if (!ctxt || !ctxt->om) {
-    ESP_LOGE(TAG, "[BLE RX ERROR] Received null context or mbuf!");
     return BLE_ATT_ERR_INVALID_HANDLE;
   }
 
   uint16_t data_len = OS_MBUF_PKTLEN(ctxt->om);
-  ESP_LOGI(TAG, "[BLE RX] Incoming write packet detected! Length: %u bytes", data_len);
-
   if (data_len == 0 || data_len > 512) {
-    ESP_LOGE(TAG, "[BLE RX ERROR] Invalid packet length: %u", data_len);
     return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
   }
 
-  uint8_t rx_buffer[512];
-  int rc = ble_hs_mbuf_to_flat(ctxt->om, rx_buffer, data_len, &data_len);
+  BleIncomingPacket packet;
+  packet.len = data_len;
+  int rc = ble_hs_mbuf_to_flat(ctxt->om, packet.data, data_len, &packet.len);
   if (rc != 0) {
-    ESP_LOGE(TAG, "[BLE RX ERROR] Failed to flatten mbuf, rc: %d", rc);
     return BLE_ATT_ERR_UNLIKELY;
   }
 
-  IDBC_AppToDevice appCmd = IDBC_AppToDevice_init_default;
-  pb_istream_t stream = pb_istream_from_buffer(rx_buffer, data_len);
-
-  if (pb_decode(&stream, IDBC_AppToDevice_fields, &appCmd)) {
-    ESP_LOGI(TAG, "[BLE RX] Protobuf decode success! Enqueuing command...");
-    if (bleCmdQueue) {
-      xQueueSend(bleCmdQueue, &appCmd, 0);
-    }
-  } else {
-    ESP_LOGE(TAG, "Protobuf Decode Error: %s", PB_GET_ERROR(&stream));
+  if (bleCmdQueue) {
+    xQueueSend(bleCmdQueue, &packet, 0);
   }
 
   return 0;
@@ -392,18 +384,8 @@ static void on_stack_sync(void) {
     ESP_LOGI(TAG, "[BLE CONFIG] Active MSYS1 Block Size: %d bytes", CONFIG_BT_NIMBLE_MSYS_1_BLOCK_SIZE);
     start_advertising();
     serial_print("[ble debug] stack synced & advertising started");
-    queue_incident_folders("/sd");
-    /*
-    if (get_pending_incident_count() == 0) {
-      queue_incident_folders("/");
-    }
-    if (get_pending_incident_count() == 0) {
-      queue_incident_folders("");
-    }
-    if (get_pending_incident_count() == 0) {
-      queue_incident_folders("./");
-    } // */
-
+    
+    // REMOVED queue_incident_folders("/sd") here to prevent blocking Core 0 on connection startup!
 }
 
 static void ble_app_on_sync(void) {
@@ -413,6 +395,15 @@ static void ble_app_on_sync(void) {
 
 static void ble_app_on_reset(int reason) {
   ESP_LOGW(TAG, "NimBLE host reset, reason: %d", reason);
+}
+
+static void ble_background_task(void *pvParameters) {
+  while (true) {
+    if (deviceConnected && notificationsEnabled) {
+      handle_pending_bluetooth_tasks();
+    }
+    vTaskDelay(pdMS_TO_TICKS(15)); // Yield generously to keep Core 0 free
+  }
 }
 
 /**
@@ -463,11 +454,13 @@ void init_ble(void) {
   nimble_port_freertos_init(nimble_host_task); 
 
   bleCmdQueue = xQueueCreate(10, sizeof(IDBC_AppToDevice));
+  queue_incident_folders("/sd");
 
   deviceReady = TRUE;
   ESP_LOGI(TAG, "========================================");
   ESP_LOGI(TAG, "BLE Server Started: %s", DEVICE_NAME);
   ESP_LOGI(TAG, "========================================");
+  xTaskCreatePinnedToCore(ble_background_task, "BleTask", 4096, NULL, 2, NULL, 0);
 }
 
 /**
@@ -558,38 +551,25 @@ void print_saved_devices(void) {
  * Encodes and sends a DeviceToApp protobuf response back to the phone via TX characteristic notifications.
  */
 static uint8_t send_device_to_app_response(const IDBC_DeviceToApp* response) {
-  if (!deviceConnected || !notificationsEnabled) {
-    ESP_LOGW(TAG, "Skipping send: Device not connected or notifications not enabled yet.");
-    return FALSE;
-  }
+  if (!deviceConnected || !notificationsEnabled) return FALSE;
 
-  while (os_msys_num_free() < 20) {
-    vTaskDelay(pdMS_TO_TICKS(20));
-  }
+  // Allocate serialization buffer dynamically on the heap to prevent stack overflow
+  uint8_t* buffer = (uint8_t*)std::malloc(512);
+  if (buffer == NULL) return FALSE;
 
-  uint8_t buffer[512];
-  pb_ostream_t stream = pb_ostream_from_buffer(buffer, sizeof(buffer));
-
+  pb_ostream_t stream = pb_ostream_from_buffer(buffer, 512);
   if (!pb_encode(&stream, IDBC_DeviceToApp_fields, response)) {
-    ESP_LOGE(TAG, "Nanopb encoding failed: %s", PB_GET_ERROR(&stream));
+    std::free(buffer);
     return FALSE;
   }
 
-  struct os_mbuf* om = NULL;
-  int timeout_ms = 4000;
+  struct os_mbuf* om = ble_hs_mbuf_from_flat(buffer, stream.bytes_written);
+  std::free(buffer); // Free heap buffer immediately after flattening into mbuf
 
-  while ((om = ble_hs_mbuf_from_flat(buffer, stream.bytes_written)) == NULL) {
-    if (timeout_ms <= 0) {
-      ESP_LOGE(TAG, "[BLE ERROR] Mbuf allocation timeout. Free blocks: %d", (int)os_msys_num_free());
-      return FALSE;
-    }
-    vTaskDelay(pdMS_TO_TICKS(50));
-    timeout_ms -= 50;
-  }
+  if (om == NULL) return FALSE;
 
   int rc = ble_gatts_notify_custom(current_conn_handle, tx_val_handle, om);
   if (rc != 0) {
-    ESP_LOGE(TAG, "[BLE ERROR] Failed to send notification, rc: %d", rc);
     os_mbuf_free_chain(om);
     return FALSE;
   }
@@ -597,6 +577,23 @@ static uint8_t send_device_to_app_response(const IDBC_DeviceToApp* response) {
   vTaskDelay(pdMS_TO_TICKS(40));
   return TRUE;
 }
+ 
+
+void notify_phone_of_event(uint32_t eventId, uint32_t distanceCm, uint32_t timeOffsetMs, uint32_t imageCount, uint32_t format) {
+  // Use static to keep large Nanopb structs off the stack
+  static IDBC_DeviceToApp msg;
+  msg = (IDBC_DeviceToApp)IDBC_DeviceToApp_init_default;
+  
+  msg.which_payload = IDBC_DeviceToApp_event_notification_tag;
+  msg.payload.event_notification.event_id = eventId;
+  msg.payload.event_notification.distance_cm = distanceCm;
+  msg.payload.event_notification.time_offset_ms = timeOffsetMs;
+  msg.payload.event_notification.image_count = imageCount;
+  msg.payload.event_notification.image_format = (IDBC_ImageFormat)format;
+
+  send_device_to_app_response(&msg);
+}
+
 
 /**
  * Processes incoming protobuf AppToDevice requests.
@@ -624,6 +621,9 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
       reqItem.startImage = req->start_from_image;
       reqItem.startChunk = req->start_from_chunk;
       std::snprintf(reqItem.targetFolder, sizeof(reqItem.targetFolder), "%s", targetFolder);
+
+      // Brief yield before enqueuing to let radio buffer clear
+      vTaskDelay(pdMS_TO_TICKS(20));
 
       if (xQueueSend(bleImageReqQueue, &reqItem, 0) != pdTRUE) {
         ESP_LOGE(TAG, "[BLE ERROR] Image request queue is full!");
@@ -663,26 +663,29 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
     case IDBC_AppToDevice_event_info_request_tag: {
       const IDBC_EventInfoRequest* infoReq = &appCmd->payload.event_info_request;
       
-      const char* targetFolder = find_target_path(infoReq->event_id);
-      if (targetFolder == NULL || std::strlen(targetFolder) == 0) {
+      uint32_t imgCount = 0;
+      bool found = false;
+
+      // Safely look up cached image count from memory list
+      if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        IncidentNode* current = pendingIncidentsHead;
+        while (current != NULL) {
+          if (current->eventId == infoReq->event_id) {
+            imgCount = current->imageCount;
+            found = true;
+            break;
+          }
+          current = current->next;
+        }
+        xSemaphoreGive(incidentMutex);
+      }
+
+      if (!found) {
         ESP_LOGW(TAG, "[BLE WARNING] Requested event info for an ID not found.");
         break;
       }
 
-      DIR *dir = opendir(targetFolder);
-      uint32_t imgCount = 0;
-      if (dir != NULL) {
-        struct dirent *entry;
-        while ((entry = readdir(dir)) != NULL) {
-          if (entry->d_type == DT_REG) {
-            if (std::strstr(entry->d_name, ".jpg") != NULL || std::strstr(entry->d_name, ".png") != NULL) {
-              imgCount++;
-            }
-          }
-        }
-        closedir(dir);
-      }
-
+      // Instant response using cached data — zero SD card blocking on Core 0
       notify_phone_of_event(
         infoReq->event_id,
         100,
@@ -692,163 +695,228 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
       );
       break;
     }
-
+   
     default:
       break;
   }
 }
 
-/**
- * Helper function to send event notifications over BLE.
- */
-void notify_phone_of_event(uint32_t eventId, uint32_t distanceCm, uint32_t timeOffsetMs, uint32_t imageCount, uint32_t format) {
-  IDBC_DeviceToApp msg = IDBC_DeviceToApp_init_default;
-  msg.which_payload = IDBC_DeviceToApp_event_notification_tag;
-  
-  msg.payload.event_notification.event_id = eventId;
-  msg.payload.event_notification.distance_cm = distanceCm;
-  msg.payload.event_notification.time_offset_ms = timeOffsetMs;
-  msg.payload.event_notification.image_count = imageCount;
-  msg.payload.event_notification.image_format = (IDBC_ImageFormat)format;
+// Persistent streaming state struct (keeps stack footprint minimal and unblocked)
+typedef struct {
+  uint32_t eventId;
+  char folderPath[MAX_PATH_LEN];
+  uint32_t currentImageIndex;
+  uint32_t currentChunk;
+  uint32_t totalChunks;
+  FILE *file;
+  uint32_t lastChunkSendMs;
+  uint8_t active;
+} ActiveStreamContext;
 
-  send_device_to_app_response(&msg);
-}
+static ActiveStreamContext activeStream = {0};
 
 /**
- * Streams all image files found in the target incident folder using the C-native ImageChunker.
+ * Incremental, non-blocking task loop handler to process queued image transfers one chunk at a time.
  */
-static uint8_t stream_incident_images(uint32_t eventId, const char* folderPath, uint32_t startImageIndex, uint32_t startChunkIndex) {
-  if (folderPath == NULL || std::strlen(folderPath) == 0) {
-    ESP_LOGE(TAG, "Invalid folder path for streaming.");
-    return FALSE;
+void handle_pending_bluetooth_tasks(void) {
+  if (!deviceReady) return;
+
+  // 1. Process incoming packet queue (non-blocking)
+  static BleIncomingPacket packet;
+  if (bleCmdQueue && xQueueReceive(bleCmdQueue, &packet, 0) == pdTRUE) {
+    static IDBC_AppToDevice appCmd;
+    appCmd = (IDBC_AppToDevice)IDBC_AppToDevice_init_default;
+    pb_istream_t stream = pb_istream_from_buffer(packet.data, packet.len);
+
+    if (pb_decode(&stream, IDBC_AppToDevice_fields, &appCmd)) {
+      ESP_LOGI(TAG, "[BLE RX] Protobuf decode success! Handling command...");
+      handle_protobuf_command(&appCmd);
+    } else {
+      ESP_LOGE(TAG, "Protobuf Decode Error: %s", PB_GET_ERROR(&stream));
+    }
   }
 
-  DIR *dir = opendir(folderPath);
-  if (dir == NULL) {
-    ESP_LOGE(TAG, "Failed to open directory for streaming: %s", folderPath);
-    return FALSE;
-  }
-
-  struct dirent *entry;
-  uint32_t currentImageIndex = 0;
-  uint8_t success = TRUE;
-
-  uint8_t *chunkWindowBuf = (uint8_t*)std::malloc(IMAGE_CHUNK_DATA_SIZE);
-  if (chunkWindowBuf == NULL) {
-    ESP_LOGE(TAG, "Failed to allocate memory for image streaming window buffer");
-    closedir(dir);
-    return FALSE;
-  }
-
-  while ((entry = readdir(dir)) != NULL) {
-    if (entry->d_type == DT_REG) {
-      if (std::strstr(entry->d_name, ".jpg") != NULL || std::strstr(entry->d_name, ".png") != NULL) {
-       
-        if (currentImageIndex < startImageIndex) {
-          currentImageIndex++;
-          continue;
-        }
-
-        char filePath[257];
-        std::snprintf(filePath, sizeof(filePath), "%s/%s", folderPath, entry->d_name);
-        /* if (!build_child_path(filePath, sizeof(filePath), folderPath, entry->d_name)) { // ai suggestion
-          ESP_LOGW(TAG, "Skipping image with an overlong path");
-          continue;
-        }  // */
-
-        FILE *f = std::fopen(filePath, "rb");
-        if (f == NULL) {
-          ESP_LOGE(TAG, "Failed to open image file: %s", filePath);
-          continue;
-        }
-
-        std::fseek(f, 0, SEEK_END);
-        long fileSize = std::ftell(f);
-        std::fseek(f, 0, SEEK_SET);
-
-        if (fileSize <= 0 || fileSize > 1024 * 512) {
-          ESP_LOGW(TAG, "Skipping invalid or oversized image file: %s (Size: %ld)", filePath, fileSize);
-          std::fclose(f);
-          currentImageIndex++;
-          continue;
-        }
-
-        size_t totalChunks = calculateTotalChunks(fileSize);
-        uint32_t startChunk = (currentImageIndex == startImageIndex) ? startChunkIndex : 0;
-
-        ESP_LOGI(TAG, "Streaming Image [%lu] via ImageChunker window: %s (Chunks: %zu, Size: %ld)", 
-                 (unsigned long)currentImageIndex, entry->d_name, totalChunks, fileSize);
-
-        for (uint32_t c = startChunk; c < totalChunks; c++) {
-          if (!deviceConnected) {
-            ESP_LOGW(TAG, "Device disconnected mid-stream. Aborting transfer.");
-            success = FALSE;
-            break;
-          }
-
-          size_t byteOffset = (size_t)c * IMAGE_CHUNK_DATA_SIZE;
-          size_t bytesToRead = IMAGE_CHUNK_DATA_SIZE;
+  // 2. If no active stream, pull the next request from the queue and open the first file
+  if (!activeStream.active) {
+    PendingImageRequest reqItem;
+    if (bleImageReqQueue && xQueueReceive(bleImageReqQueue, &reqItem, 0) == pdTRUE) {
+      if (reqItem.targetFolder[0] != '\0') {
+        DIR *dir = opendir(reqItem.targetFolder);
+        if (dir != NULL) {
+          struct dirent *entry;
+          uint32_t imgIdx = 0;
+          char *foundPath = NULL;
           
-          if (byteOffset + bytesToRead > (size_t)fileSize) {
-            bytesToRead = (size_t)fileSize - byteOffset;
-          }
-
-          std::fseek(f, (long)byteOffset, SEEK_SET);
-          size_t bytesRead = std::fread(chunkWindowBuf, 1, bytesToRead, f);
-
-          if (bytesRead != bytesToRead) {
-            ESP_LOGE(TAG, "Failed to read chunk %lu at offset %zu", (unsigned long)c, byteOffset);
-            continue;
-          }
-
-          IDBC_ImageChunk chunkMsg;
-          if (buildImageChunkFromWindow(chunkWindowBuf, bytesRead, eventId, currentImageIndex, c, totalChunks, &chunkMsg)) {
-            IDBC_DeviceToApp resp = IDBC_DeviceToApp_init_default;
-            resp.which_payload = IDBC_DeviceToApp_image_chunk_tag;
-            resp.payload.image_chunk = chunkMsg;
-
-            if (send_device_to_app_response(&resp) == FALSE) {
-              ESP_LOGE(TAG, "Failed to transmit image chunk via BLE notification.");
+          while ((entry = readdir(dir)) != NULL) {
+            if (entry->d_type == DT_REG) {
+              if (std::strstr(entry->d_name, ".jpg") != NULL || std::strstr(entry->d_name, ".png") != NULL) {
+                if (imgIdx == reqItem.startImage) {
+                  // Dynamically allocate path buffer to completely bypass GCC format-truncation checks
+                  foundPath = (char*)std::malloc(MAX_PATH_LEN * 2);
+                  if (foundPath != NULL) {
+                    std::snprintf(foundPath, MAX_PATH_LEN * 2, "%s/%s", reqItem.targetFolder, entry->d_name);
+                  }
+                  break;
+                }
+                imgIdx++;
+              }
             }
           }
+          closedir(dir);
 
-          vTaskDelay(pdMS_TO_TICKS(40));
+          if (foundPath != NULL) {
+            FILE *f = std::fopen(foundPath, "rb");
+            std::free(foundPath); // Free path buffer immediately after open
+
+            if (f != NULL) {
+              std::fseek(f, 0, SEEK_END);
+              long fileSize = std::ftell(f);
+              std::fseek(f, 0, SEEK_SET);
+
+              if (fileSize > 0 && fileSize <= 1024 * 512) {
+                static IDBC_DeviceToApp infoMsg;
+                infoMsg = (IDBC_DeviceToApp)IDBC_DeviceToApp_init_default;
+                infoMsg.which_payload = IDBC_DeviceToApp_image_info_tag;
+                infoMsg.payload.image_info.event_id = reqItem.eventId;
+                infoMsg.payload.image_info.image_index = reqItem.startImage;
+                infoMsg.payload.image_info.image_size_bytes = (uint32_t)fileSize;
+                infoMsg.payload.image_info.total_chunks = calculateTotalChunks(fileSize);
+                
+                send_device_to_app_response(&infoMsg);
+                vTaskDelay(pdMS_TO_TICKS(30));
+
+                activeStream.eventId = reqItem.eventId;
+                std::snprintf(activeStream.folderPath, sizeof(activeStream.folderPath), "%s", reqItem.targetFolder);
+                activeStream.currentImageIndex = reqItem.startImage;
+                activeStream.currentChunk = reqItem.startChunk;
+                activeStream.totalChunks = calculateTotalChunks(fileSize);
+                activeStream.file = f;
+                activeStream.lastChunkSendMs = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+                activeStream.active = TRUE;
+                ESP_LOGI(TAG, "[BLE Stream] Started streaming Event %lu, Image %lu", (unsigned long)reqItem.eventId, (unsigned long)reqItem.startImage);
+              } else {
+                std::fclose(f);
+              }
+            }
+          }
         }
-
-        std::fclose(f);
-        currentImageIndex++;
-
-        if (!success) break;
       }
     }
   }
 
-  std::free(chunkWindowBuf);
-  closedir(dir);
-  ESP_LOGI(TAG, "Finished streaming images from folder: %s", folderPath);
-  return success;
-}
+  // 3. If a stream is active, transmit ONE chunk when the pacing interval permits
+ if (activeStream.active) {
+    if (!deviceConnected) {
+      if (activeStream.file) std::fclose(activeStream.file);
+      std::memset(&activeStream, 0, sizeof(activeStream));
+      return;
+    }
 
-/**
- * Task loop handler to process queued image transfer requests.
- */
-void handle_pending_bluetooth_tasks(void) {
-  if (!deviceReady || !deviceConnected) return;
+    uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    // 50ms pacing interval between chunks to keep the radio buffer clear
+    if (now - activeStream.lastChunkSendMs >= 50) {
+      activeStream.lastChunkSendMs = now;
 
-  // Process queued commands safely outside the NimBLE host thread
-  IDBC_AppToDevice appCmd;
-  if (bleCmdQueue && xQueueReceive(bleCmdQueue, &appCmd, 0) == pdTRUE) {
-    handle_protobuf_command(&appCmd);
-  }
+      size_t byteOffset = (size_t)activeStream.currentChunk * IMAGE_CHUNK_DATA_SIZE;
+      std::fseek(activeStream.file, 0, SEEK_END);
+      long fileSize = std::ftell(activeStream.file);
 
-  // Existing image transfer queue handler...
-  PendingImageRequest reqItem;
-  if (bleImageReqQueue && xQueueReceive(bleImageReqQueue, &reqItem, 0) == pdTRUE) {
-    if (reqItem.targetFolder[0] != '\0') {
-      stream_incident_images(reqItem.eventId, reqItem.targetFolder, reqItem.startImage, reqItem.startChunk);
+      if (byteOffset < (size_t)fileSize) {
+        size_t bytesToRead = IMAGE_CHUNK_DATA_SIZE;
+        if (byteOffset + bytesToRead > (size_t)fileSize) {
+          bytesToRead = (size_t)fileSize - byteOffset;
+        }
+
+        static uint8_t chunkWindowBuf[IMAGE_CHUNK_DATA_SIZE];
+        std::fseek(activeStream.file, (long)byteOffset, SEEK_SET);
+        size_t bytesRead = std::fread(chunkWindowBuf, 1, bytesToRead, activeStream.file);
+
+        static IDBC_ImageChunk chunkMsg;
+        static IDBC_DeviceToApp resp;
+
+        if (buildImageChunkFromWindow(chunkWindowBuf, bytesRead, activeStream.eventId, activeStream.currentImageIndex, activeStream.currentChunk, activeStream.totalChunks, &chunkMsg)) {
+          resp = (IDBC_DeviceToApp)IDBC_DeviceToApp_init_default;
+          resp.which_payload = IDBC_DeviceToApp_image_chunk_tag;
+          resp.payload.image_chunk = chunkMsg;
+          
+          // Send directly; send_device_to_app_response manages its own msys blocking/waiting safely
+          send_device_to_app_response(&resp);
+        }
+
+        // Only increment AFTER attempting to send the chunk
+        activeStream.currentChunk++;
+
+        // When current image finishes, check for subsequent images in the folder
+        if (activeStream.currentChunk >= activeStream.totalChunks) {
+          std::fclose(activeStream.file);
+          activeStream.file = NULL;
+
+          DIR *dir = opendir(activeStream.folderPath);
+          if (dir != NULL) {
+            struct dirent *entry;
+            uint32_t imgIdx = 0;
+            uint32_t targetNextImage = activeStream.currentImageIndex + 1;
+            char *nextPath = NULL;
+
+            while ((entry = readdir(dir)) != NULL) {
+              if (entry->d_type == DT_REG) {
+                if (std::strstr(entry->d_name, ".jpg") != NULL || std::strstr(entry->d_name, ".png") != NULL) {
+                  if (imgIdx == targetNextImage) {
+                    nextPath = (char*)std::malloc(MAX_PATH_LEN * 2);
+                    if (nextPath != NULL) {
+                      std::snprintf(nextPath, MAX_PATH_LEN * 2, "%s/%s", activeStream.folderPath, entry->d_name);
+                    }
+                    break;
+                  }
+                  imgIdx++;
+                }
+              }
+            }
+            closedir(dir);
+
+            if (nextPath != NULL) {
+              FILE *f = std::fopen(nextPath, "rb");
+              std::free(nextPath);
+
+              if (f != NULL) {
+                std::fseek(f, 0, SEEK_END);
+                long nextSize = std::ftell(f);
+                std::fseek(f, 0, SEEK_SET);
+                uint32_t nextTotalChunks = calculateTotalChunks(nextSize);
+
+                // Send ImageInfo for the next image in the sequence
+                static IDBC_DeviceToApp nextInfoMsg;
+                nextInfoMsg = (IDBC_DeviceToApp)IDBC_DeviceToApp_init_default;
+                nextInfoMsg.which_payload = IDBC_DeviceToApp_image_info_tag;
+                nextInfoMsg.payload.image_info.event_id = activeStream.eventId;
+                nextInfoMsg.payload.image_info.image_index = targetNextImage;
+                nextInfoMsg.payload.image_info.image_size_bytes = (uint32_t)nextSize;
+                nextInfoMsg.payload.image_info.total_chunks = (uint32_t)nextTotalChunks;
+                
+                send_device_to_app_response(&nextInfoMsg);
+                vTaskDelay(pdMS_TO_TICKS(30));
+
+                activeStream.currentImageIndex = targetNextImage;
+                activeStream.currentChunk = 0;
+                activeStream.totalChunks = calculateTotalChunks(nextSize);
+                activeStream.file = f;
+                return;
+              }
+            }
+          }
+
+          ESP_LOGI(TAG, "[BLE Stream] Completed all images for Event %lu", (unsigned long)activeStream.eventId);
+          std::memset(&activeStream, 0, sizeof(activeStream));
+        }
+      } else {
+        if (activeStream.file) std::fclose(activeStream.file);
+        std::memset(&activeStream, 0, sizeof(activeStream));
+      }
     }
   }
 }
+
+
 
 /**
  * Configures advertising parameters and starts broadcasting.
@@ -932,7 +1000,7 @@ void runTransferTest(uint32_t num, uint8_t counter) {
         reqItem.eventId = current->eventId;
         reqItem.startImage = 0;
         reqItem.startChunk = 0;
-        std::snprintf(reqItem.targetFolder, sizeof(reqItem.targetFolder), "%s", current->folderPath);
+        std::snprintf(reqItem.targetFolder, sizeof(reqItem.targetFolder), "%.*s", (int)(sizeof(reqItem.targetFolder) - 1), current->folderPath);
 
         if (bleImageReqQueue && xQueueSend(bleImageReqQueue, &reqItem, 0) == pdTRUE) {
           ESP_LOGI(TAG, "[BLE TEST] Queued Event ID %lu for transfer", (unsigned long)current->eventId);
@@ -955,7 +1023,7 @@ void runTransferTest(uint32_t num, uint8_t counter) {
           reqItem.eventId = current->eventId;
           reqItem.startImage = 0;
           reqItem.startChunk = 0;
-          std::snprintf(reqItem.targetFolder, sizeof(reqItem.targetFolder), "%s", current->folderPath);
+          std::snprintf(reqItem.targetFolder, sizeof(reqItem.targetFolder), "%.*s", (int)(sizeof(reqItem.targetFolder) - 1), current->folderPath);
 
           if (bleImageReqQueue && xQueueSend(bleImageReqQueue, &reqItem, 0) == pdTRUE) {
             ESP_LOGI(TAG, "[BLE TEST] Queued specific Event ID %lu for transfer", (unsigned long)num);
