@@ -17,9 +17,9 @@ IncidentNode* pendingIncidentsHead = NULL;
 
 extern void serial_print(const char* str); // update this before prod
 
-#define ESP_LOGI(tag, format, ...) { char buf[360]; snprintf(buf, sizeof(buf), "[INFO] " format, ##__VA_ARGS__); serial_print(buf); }
-#define ESP_LOGW(tag, format, ...) { char buf[360]; snprintf(buf, sizeof(buf), "[WARN] " format, ##__VA_ARGS__); serial_print(buf); }
-#define ESP_LOGE(tag, format, ...) { char buf[360]; snprintf(buf, sizeof(buf), "[ERROR] " format, ##__VA_ARGS__); serial_print(buf); }
+//#define ESP_LOGI(tag, format, ...) { char buf[360]; snprintf(buf, sizeof(buf), "[INFO] " format, ##__VA_ARGS__); serial_print(buf); }
+//#define ESP_LOGW(tag, format, ...) { char buf[360]; snprintf(buf, sizeof(buf), "[WARN] " format, ##__VA_ARGS__); serial_print(buf); }
+//#define ESP_LOGE(tag, format, ...) { char buf[360]; snprintf(buf, sizeof(buf), "[ERROR] " format, ##__VA_ARGS__); serial_print(buf); }
 
 /**
  * Helper function to securely build child paths without buffer overflow or truncation
@@ -383,7 +383,7 @@ void scan_incident_directory(const char *incidentFolderPath) {
     if (!get_ms_from_image_title(entry->d_name, &imgMs)) continue;
 
     float distInch = 0.0f;
-    char msg[96];
+    char msg[512]; // Increased buffer size to prevent format truncation warnings
     if (match_timestamp_in_csv(incidentFolderPath, imgMs, &distInch)) {
       snprintf(msg, sizeof(msg), "%s -> %lu ms, %.2f in", entry->d_name, (unsigned long)imgMs, distInch);
     } else {
