@@ -11,6 +11,7 @@
 #include "IBDC_v0.3.2.pb.h"
 
 #include "esp_bt.h"
+#include "esp_timer.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -115,6 +116,7 @@ static bool build_child_path(char *dest, size_t dest_size, const char *parent, c
     std::memcpy(dest + prefix_len, child, child_len + 1);
     return true;
 } // end ai suggested helper */  
+static uint32_t imagesPerEventSetting = 0;
 
 // Minimal HID Keyboard Report Descriptor (Enables OS-level phone pairing)
 static const uint8_t hidReportDescriptor[] = {
@@ -384,8 +386,6 @@ static void on_stack_sync(void) {
     ESP_LOGI(TAG, "[BLE CONFIG] Active MSYS1 Block Size: %d bytes", CONFIG_BT_NIMBLE_MSYS_1_BLOCK_SIZE);
     start_advertising();
     serial_print("[ble debug] stack synced & advertising started");
-    
-    // REMOVED queue_incident_folders("/sd") here to prevent blocking Core 0 on connection startup!
 }
 
 static void ble_app_on_sync(void) {
@@ -664,6 +664,9 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
       const IDBC_EventInfoRequest* infoReq = &appCmd->payload.event_info_request;
       
       uint32_t imgCount = 0;
+      uint32_t distanceCm = 0;
+      uint32_t timeOffsetMs = 0;
+      uint32_t eventMs = 0;
       bool found = false;
 
       // Safely look up cached image count from memory list
@@ -672,6 +675,12 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
         while (current != NULL) {
           if (current->eventId == infoReq->event_id) {
             imgCount = current->imageCount;
+            if (get_incident_event_metadata(current->folderPath, &distanceCm, &eventMs)) {
+              uint32_t nowMs = (uint32_t)(esp_timer_get_time() / 1000ULL);  // same stopwatch as millis()
+              timeOffsetMs = (nowMs > eventMs) ? (nowMs - eventMs) : 0;
+            } else {
+              ESP_LOGW(TAG, "[BLE WARNING] No image metadata for event %lu", (unsigned long)infoReq->event_id);
+            }
             found = true;
             break;
           }
@@ -685,17 +694,37 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
         break;
       }
 
-      // Instant response using cached data — zero SD card blocking on Core 0
+      ESP_LOGI(TAG, "[T#116] event %lu: distance=%lu cm, offset=%lu ms", (unsigned long)infoReq->event_id, (unsigned long)distanceCm, (unsigned long)timeOffsetMs);
+      
       notify_phone_of_event(
-        infoReq->event_id,
-        100,
-        -100,
-        imgCount,
+        infoReq->event_id, 
+        distanceCm, 
+        timeOffsetMs, 
+        imgCount, 
         IDBC_ImageFormat_IMAGE_FORMAT_JPEG
       );
       break;
     }
-   
+
+    case IDBC_AppToDevice_settings_tag: {
+      imagesPerEventSetting = appCmd->payload.settings.images_per_event;
+      ESP_LOGI(TAG, "Settings received: images_per_event=%lu", (unsigned long)imagesPerEventSetting);
+      // TODO (future dev team): apply the setting
+      break;
+    }
+
+    // Clock response stub: disabled until the time sync protocol is approved
+    // (needs the v0.3.3 generated files)
+    /*
+    case IDBC_AppToDevice_app_time_response_tag: {
+      const IDBC_AppTimeResponse* t = &appCmd->payload.app_time_response;
+      ESP_LOGI(TAG, "App time: %02lu:%02lu:%02lu",
+              (unsigned long)t->hour24, (unsigned long)t->minute, (unsigned long)t->second);
+      break;
+    }*/
+
+     
+
     default:
       break;
   }
@@ -916,8 +945,6 @@ void handle_pending_bluetooth_tasks(void) {
   }
 }
 
-
-
 /**
  * Configures advertising parameters and starts broadcasting.
  */
@@ -947,7 +974,6 @@ static void start_advertising(void) {
 
     struct ble_hs_adv_fields rsp_fields;
     std::memset(&rsp_fields, 0, sizeof(rsp_fields));
-
     rsp_fields.uuids128 = (ble_uuid128_t *)&uuid_service_data;
     rsp_fields.num_uuids128 = 1;
     rsp_fields.uuids128_is_complete = 1;

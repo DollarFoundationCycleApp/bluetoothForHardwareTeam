@@ -76,6 +76,11 @@ void refresh_list(void);
 const char* find_target_path(uint32_t event_id);
 uint8_t remove_incident_node(uint32_t event_id);
 int get_pending_incident_count(void);
+uint8_t get_ms_from_image_title(const char *filename, uint32_t *out_ms);
+uint8_t parse_incident_metadata(const char *incidentFolderPath);
+uint8_t match_timestamp_in_csv(const char *incident_folder_path, uint32_t target_ms, float *out_distance);
+void scan_incident_directory(const char *incidentFolderPath);
+uint8_t get_incident_event_metadata(const char *incident_folder_path, uint32_t *out_distance_cm, uint32_t *out_ms);
 
 #if defined(__cplusplus)
 }

@@ -769,7 +769,6 @@ void loop() {
         }
     }
   }
-  //handle_pending_bluetooth_tasks();
 }
 
 
@@ -784,11 +783,6 @@ extern "C" void serial_print(const char* str) {
     }
 }
 
-bool bleInUse(void) { return true; }
-bool btInUse(void) { return true; }
-
 #ifdef __cplusplus
 }
 #endif
-
-

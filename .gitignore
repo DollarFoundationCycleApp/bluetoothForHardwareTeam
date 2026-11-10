@@ -146,6 +146,7 @@ bld/
 # Visual Studio 2015/2017 cache/options directory
 .vs/
 .pio
+managed_components/
 .vscode/
 
 # Visual Studio 2017 auto generated files
