@@ -424,8 +424,12 @@ void init_ble(void) {
   
   esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
 
+  ESP_LOGI(TAG, "[ble debug] Starting mutex and queue creations");
   incidentMutex = xSemaphoreCreateMutex();
   bleImageReqQueue = xQueueCreate(10, sizeof(PendingImageRequest));
+  bleCmdQueue = xQueueCreate(10, sizeof(IDBC_AppToDevice));
+
+  ESP_LOGI(TAG, "[ble debug] Starting ble service creations");
 
   nimble_port_init();
   ble_svc_gap_init();
@@ -451,9 +455,10 @@ void init_ble(void) {
   
   vTaskDelay(pdMS_TO_TICKS(100));
 
+    ESP_LOGI(TAG, "[ble debug] Starting visible services.");
+
   nimble_port_freertos_init(nimble_host_task); 
 
-  bleCmdQueue = xQueueCreate(10, sizeof(IDBC_AppToDevice));
   queue_incident_folders("/sd");
 
   deviceReady = TRUE;

@@ -783,6 +783,10 @@ extern "C" void serial_print(const char* str) {
     }
 }
 
+// If removed these functions will cause memory access errors when nimBLE is initialized.
+bool bleInUse(void) { return true; } // DO NOT REMOVE
+bool btInUse(void) { return true; }  // DO NOT REMOVE
+
 #ifdef __cplusplus
 }
 #endif

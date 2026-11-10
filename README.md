@@ -1,5 +1,7 @@
 # bluetoothForHardwareTeam
 
+Comment out // managed_components > espressif_esp32-camera >driver >cam_hal.c line 299
+
 ## Proto testing
 
 Adding the documentation here so others can use it when they have access. In the IDBC.ino file from the hardware team at the top add:
