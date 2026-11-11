@@ -67,6 +67,7 @@ float distanceInch;
 
 // Camera status variable
 bool camera_status = false;
+static uint32_t cameraRetryAfterMs = 0;
 
 // LED state
 #define RED_LED_DURATION_MS 1000
@@ -206,16 +207,20 @@ void appendToCSV(const char *fileName, const char *data) {
 // Captures a frame into a heap-allocated buffer (PSRAM preferred, DRAM fallback).
 // Caller must free with free() when done.
 uint8_t *photo_capture(size_t *outLen) {
+  *outLen = 0;
+  if (millis() < cameraRetryAfterMs) return nullptr;
   // Retry up to 3 times — esp_camera_fb_get() can return NULL transiently
   // when the camera driver's DMA buffer is mid-swap. A short yield is enough.
   camera_fb_t *fb = nullptr;
   for (int attempt = 0; attempt < 3 && !fb; attempt++) {
     if (attempt > 0) vTaskDelay(pdMS_TO_TICKS(30));
+    uint32_t t0 = millis();
     fb = esp_camera_fb_get();
+    if (!fb && millis() - t0 > 1000) break;
   }
   if (!fb) {
+    cameraRetryAfterMs = millis() + 30000;
     writeLog(millis(), "ERR", "camera frame buffer unavailable");
-    *outLen = 0;
     return nullptr;
   }
 
@@ -677,9 +682,11 @@ if (AUSTIN_COMPILES == 0) {
   digitalWrite(greenLEDPin,  HIGH);
 
   init_ble();
+  Serial.printf("PSRAM: %lu bytes\n", (unsigned long)ESP.getPsramSize());
 }
 
 void loop() {
+  static uint32_t dropCount = 0, lastDropPrintMs = 0;
   // Clears the trigPin
   digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
@@ -709,12 +716,12 @@ void loop() {
   cmd.measurement.distanceInch = distanceInch;
   cmd.measurement.timestamp    = millis();
   if (xQueueSend(storageQueue, &cmd, 0) != pdTRUE) {
-    Serial.println("Storage queue full, measurement dropped!");
-    StorageCmd logCmd;
-    logCmd.type = CMD_LOG_EVENT;
-    logCmd.logEvent.timestamp = millis();
-    snprintf(logCmd.logEvent.msg, sizeof(logCmd.logEvent.msg), "queue full, msmt dropped");
-    xQueueSend(storageQueue, &logCmd, 0);
+    dropCount++;
+    if (millis() - lastDropPrintMs >= 1000) {
+      Serial.printf("Storage queue full: %lu measurements dropped\n", (unsigned long)dropCount);
+      dropCount = 0;
+      lastDropPrintMs = millis();
+    }
   }
 
   // Update status LEDs
