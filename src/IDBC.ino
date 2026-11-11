@@ -17,7 +17,7 @@
 #include "IncidentManager.h"
 #include "IBDC_v0.3.2.pb.h"
 
-#define AUSTIN_COMPILES 0 // for jacob its 0 for austin its 1.
+#define AUSTIN_COMPILES 1 // for jacob its 0 for austin its 1.
 
 // Forward declarations for BLE symbols in Bluetooth
 extern uint8_t deviceConnected;
