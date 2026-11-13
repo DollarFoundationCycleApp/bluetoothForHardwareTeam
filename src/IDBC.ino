@@ -18,6 +18,7 @@
 #include "IBDC_v0.3.2.pb.h"
 
 #define AUSTIN_COMPILES 1 // for jacob its 0 for austin its 1.
+#define ENABLE_CAMERA 0   // 0 = skip camera (BLE/log testing), 1 = normal
 
 // Forward declarations for BLE symbols in Bluetooth
 extern uint8_t deviceConnected;
@@ -582,7 +583,7 @@ void errorBlink() {
 
 void setup() {
   Serial.begin(115200); // Starts the serial communication
-  esp_log_level_set("cam_hal", ESP_LOG_ERROR); // jacob added for sanity and to read console
+  //esp_log_level_set("cam_hal", ESP_LOG_ERROR); // jacob added for sanity and to read console
   // Increase the Task Watchdog timeout from the default 5s to 30s.
   // Incident saves write multiple large JPEGs to SD sequentially; even with
   // yields between them, a slow card can take several seconds per file.
@@ -614,9 +615,13 @@ if (AUSTIN_COMPILES == 0) {
   digitalWrite(greenLEDPin, HIGH);
 
   // initialize camera
-  CameraParameters(); // this function does the bulk of the camera setup
-  camera_status = true; // camera status set to true
-  Serial.println("Camera OK!"); // show through serial monitor that camera is working
+  #if ENABLE_CAMERA
+    CameraParameters(); // this function does the bulk of the camera setup
+    camera_status = true; // camera status set to true
+    Serial.println("Camera OK!"); // show through serial monitor that camera is working
+  #else
+    Serial.println("Camera disabled for testing");
+  #endif
 
   // initialize SD card
   // Must explicitly set SPI pins — default SPI pins (MOSI=11, SCK=12, MISO=13)
