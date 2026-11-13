@@ -583,7 +583,7 @@ void errorBlink() {
 
 void setup() {
   Serial.begin(115200); // Starts the serial communication
-  //esp_log_level_set("cam_hal", ESP_LOG_ERROR); // jacob added for sanity and to read console
+  esp_log_level_set("cam_hal", ESP_LOG_ERROR); // jacob added for sanity and to read console
   // Increase the Task Watchdog timeout from the default 5s to 30s.
   // Incident saves write multiple large JPEGs to SD sequentially; even with
   // yields between them, a slow card can take several seconds per file.

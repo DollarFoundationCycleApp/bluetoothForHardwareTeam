@@ -10,6 +10,7 @@
 
 #define TAG "INCIDENT_MANAGER"
 #define CSV_MATCH_TOLERANCE_MS 100   // rows are ~20-55 ms apart
+#define INCIDENT_BASE_PATH "/sd"  // Same mount point the startup scan uses
 extern void serial_print(const char* str);
 
 // Global Linked List Head Pointer
@@ -177,9 +178,12 @@ void refresh_list(void) {
     xSemaphoreGive(incidentMutex);
   }
   
-  queue_incident_folders("/");
+  queue_incident_folders(INCIDENT_BASE_PATH);
   vTaskDelay(pdMS_TO_TICKS(10));
   
+  if (get_pending_incident_count() == 0) {
+    queue_incident_folders("/");
+  }
   if (get_pending_incident_count() == 0) {
     queue_incident_folders("./");
   }
