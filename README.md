@@ -1,64 +1,51 @@
 # bluetoothForHardwareTeam
 
+## PlatformIO instructions
+
+PlatformIO is a VS code addon currently it has an alien/bug icon and has verified ownership of platformio.org. The creator is also platformio.
+
+### Initialization instructions
+
+1) Install the PlatformIO extension in VS code (if it is not already on the machine).
+2) Open the project at the root level (where the .ini file is).
+3) Find the alien/bug icon on the side bar of VS code.
+4) Click on the alien/bug icon.
+5) Might need to wait a minute for the platformIO library to initialize and build elements that are in the git ignore. *might say there is no .ini file but give it 10 minutes tops before trying to relocate it.*
+6) Ensure the seed_xiao_esp32_s3 section is there.
+7) Celebrate project is initialized and can be built for the device.
+
+### Loading it onto the device
+
+1) Follow the Initialization instructions if you haven't already done so
+2) Navigate to the seed_xiao_esp32_s3 section
+3) If it is not already enlarged, enlarge it and the general section.
+4) Connect the IBDC device to the computer through a usb connection.
+5) Click 'Upload' or 'Upload and Monitor' under the seed_xiao_esp32_s3 > General panel in the PlatformIO Project Tasks.
+6) Wait for confirmation of finished upload.
+7) Upon confirmation the VS code terminal is no longer needed unless it is being used for monitoring.
+
+### Developer Notes
+
+There are build flags in sdkconfig.defaults that relate to the BLE interface. These can not be removed without causing the stack size to be reduced to 100 bytes or less for NimBLE resulting in a lot of crashes. With that said if someone was to edit platformio.ini, sdkconfig.defaults, sdkconfig.seed_xiao_esp32_s3, or a CMakeLists.txt then before the next upload they will need to do a full clean and build cycle. It is recommended that at this time they also comment out the line mentioned under the QOL update.
+
+Note on **AUSTIN_COMPILES** Macro in IDBC.ino, beyond testing this macro should stay in 1 or be removed. The whole point of the macro is to allow a development board the use of a button to debug features in real time.
+
+#### QOL update for PlatformIO
+
 Comment out // managed_components > espressif_esp32-camera >driver >cam_hal.c line 299
 
-## Proto testing
+#### Libraries necessary for development and loading
 
-Adding the documentation here so others can use it when they have access. In the IDBC.ino file from the hardware team at the top add:
+NimBLE is the library that is handling the bluetooth connection for the IDBC program.
 
-```Arduino
+NanoPB has a repository that will allow developers to convert a .proto file into a pb.c and a pb.h for NimBLE to process.
 
-#include "IBDC_v0.3.32.pb.h"
-// Forward declarations for BLE symbols in Bluetooth.ino
-extern bool deviceConnected;
-void initBLE();
-void notifyPhoneOfEvent(uint32_t eventId, uint32_t distanceCm, uint32_t timeOffsetMs, uint32_t imageCount, uint32_t format);
-//Button
-const int buttonPin = 4;
-unsigned long lastButtonPressMs = 0;
-const unsigned long debounceDelayMs = 200; // 200ms debounce
-uint32_t testEventId = 100;
-```
-
-Add this to setup after the other pinModes
-
-```Arduino
-  pinMode(buttonPin, INPUT_PULLUP);
-```
-
-and at the end of the loop method add:
-
-```Arduino
-  if (digitalRead(buttonPin) == LOW) {
-    if (millis() - lastButtonPressMs >= debounceDelayMs) {
-        lastButtonPressMs = millis();
-        
-        if (deviceConnected) {
-            Serial.println("Button pressed: Sending Protobuf Event Notification...");
-            
-            /*
-            // Send a test EventNotification protobuf packet over BLE
-            notifyPhoneOfEvent(
-                testEventId++,                           // event_id
-                static_cast<uint32_t>(distanceInch * 2.54f), // distance_cm
-                millis(),                                // time_offset_ms
-                1,                                       // image_count
-                IDBC_ImageFormat_IMAGE_FORMAT_JPEG       // image_format
-            ); // */
-            // /*
-            // Test image transfer over proto
-            runTransferTest(11, false);
-            // */
-        } else {
-            Serial.println("Button pressed, but BLE is not connected!");
-        }
-    }
-  }
-```
+There are a lot of libraries associated esp_idf system and the alternative is arduino libraries or less effective memory optimizations that'll possibly cause a crash.
 
 ## Image Chunker Demo
 
 The Image Chunker demo demonstrates how an image is:
+
 1. Read from a file as raw bytes.
 2. Identified as JPEG or PNG.
 3. Divided into 400-byte `ImageChunk` payloads.
@@ -66,9 +53,11 @@ The Image Chunker demo demonstrates how an image is:
 5. Verified to be byte-for-byte identical to the original image.
 
 ### Requirements
+
 The demo is currently built and tested using GCC through MSYS2 UCRT64.
 
 ### Building
+
 From the repository root, open an MSYS2 UCRT64 terminal and run:
 
 ```bash
@@ -82,28 +71,9 @@ gcc -Isrc/main/IDBC -Isrc/main/IDBC/Nanopb ImageChunkerDemo.o ImageChunker.o IBD
 ```
 
 ### Running
+
 ```bash
 ./ImageChunkerDemo.exe <input-image> <output-image>
 ```
 
----------------------------------------------------------------------------------------------------------------------------- 
-
-## Libraries necessary for development and loading
-
-### Arduino
-
- * NanoPb Files are included and can be moved into the Ardunio library folder.
-   * Secondary option is to change the header to be the files in the NanoPb but then you'll have to transport that over as well.
- * NimBLE Files are zipped but can otherwise be moved into the Arduino library folder.
-
-### Setup
-
-Take the IDBC zip file from the discord and move into an unzipped location. From there copy and paste the Bluetooth.ino, IBDC_V0.3.2 Options, pb.c, pb.h, and .proto files into the unzipped IDBC folder. Then open the ardunio IDE. 
-
-Configure the IDE to allow the ESP32 s3 Xiao to be seen on the com port. At the very bottom of the Setup() function in IDBC.ino place `initBLE();` so that bluetooth gets initialized.
-
-From there go ahead and click upload. Then wait it should take approximately 10 minutes for longer compilation times. If this is the first time compiling the code it can take up to 45 minutes (thank you Arduino).
-
-### Notes
-
-Bluetooth should be accessible from the standard bluetooth module in a phone but is not compatible with the computer.
+----------------------------------------------------------------------------------------------------------------------------
