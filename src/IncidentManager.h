@@ -45,6 +45,14 @@ extern "C" {
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <inttypes.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #define MAX_PENDING_INCIDENTS 16
 #define MAX_PATH_LEN          256
 

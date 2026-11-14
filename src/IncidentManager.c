@@ -1,11 +1,4 @@
 #include "IncidentManager.h"
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
-#include <inttypes.h>
-#include <dirent.h>
-#include <sys/stat.h>
-#include <unistd.h>
 #include "esp_log.h"
 
 #define TAG "INCIDENT_MANAGER"
@@ -17,19 +10,18 @@ IncidentNode* pendingIncidentsHead = NULL;
 
 extern void serial_print(const char* str); // update this before prod
 
-//#define ESP_LOGI(tag, format, ...) { char buf[360]; snprintf(buf, sizeof(buf), "[INFO] " format, ##__VA_ARGS__); serial_print(buf); }
-//#define ESP_LOGW(tag, format, ...) { char buf[360]; snprintf(buf, sizeof(buf), "[WARN] " format, ##__VA_ARGS__); serial_print(buf); }
-//#define ESP_LOGE(tag, format, ...) { char buf[360]; snprintf(buf, sizeof(buf), "[ERROR] " format, ##__VA_ARGS__); serial_print(buf); }
 
 /**
  * Helper function to securely build child paths without buffer overflow or truncation
  */
 static uint8_t build_child_path(char *dest, size_t dest_size, const char *parent, const char *child) {
+
   size_t parent_len = strlen(parent);
   size_t child_len = strlen(child);
   size_t prefix_len = parent_len;
   size_t separator_len = parent_len > 0 && parent[parent_len - 1] != '/' ? 1 : 0;
 
+  // handle the different ways root is handled based on lang and library
   if (parent_len == 0) {
     dest[0] = '/';
     prefix_len = 1;
@@ -37,10 +29,12 @@ static uint8_t build_child_path(char *dest, size_t dest_size, const char *parent
     prefix_len = 1;
   }
 
+  // gaurd against buffer overflow (needed for PlatformIO)
   if (prefix_len + separator_len + child_len + 1 > dest_size) {
     return FALSE;
   }
 
+  // copy parts that matter into where we need them
   if (parent_len > 0) {
     memcpy(dest, parent, prefix_len);
   }
@@ -55,9 +49,12 @@ static uint8_t build_child_path(char *dest, size_t dest_size, const char *parent
  * Internal helper to safely insert or queue an incident node with a cached image count
  */
 static void add_incident_to_list(uint32_t eventId, const char* fullPath, uint32_t imageCount) {
+  // try to grab the mutex, but 50ms timeout to prevent deadlock
   if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
     uint8_t alreadyExists = FALSE;
     IncidentNode* current = pendingIncidentsHead;
+
+    // check for duplicate before allocating a new node
     while (current != NULL) {
       if (current->eventId == eventId) {
         alreadyExists = TRUE;
@@ -74,14 +71,18 @@ static void add_incident_to_list(uint32_t eventId, const char* fullPath, uint32_
         newNode->imageCount = imageCount;
         newNode->active = TRUE;
         
+        //prepend to the linked list for simplicity (FIFO order is not critical here)
         newNode->next = pendingIncidentsHead;
         pendingIncidentsHead = newNode;
 
+        // log it for visibility
         ESP_LOGI(TAG, "Queued incident folder: %s [EventId: %lu, Images: %lu]", fullPath, eventId, (unsigned long)imageCount);
       } else {
+        // log failure for development
         ESP_LOGE(TAG, "Malloc failed for new incident node!");
       }
     }
+    // release mutex
     xSemaphoreGive(incidentMutex);
   }
 }
@@ -98,11 +99,13 @@ void queue_incident_folders(const char* baseFolderPath) {
 
   struct dirent *entry;
   while ((entry = readdir(dir)) != NULL) {
+    // skip current and parent dir pointers
     if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
       continue;
     }
 
     // Match folders starting with "incident" safely using strncasecmp
+    // todo rename to what we actually need. Might want it as a macro
     if (strncasecmp(entry->d_name, "incident", 8) == 0) {
       char fullPath[MAX_PATH_LEN];
       if (build_child_path(fullPath, sizeof(fullPath), baseFolderPath, entry->d_name)) {
@@ -121,14 +124,16 @@ void queue_incident_folders(const char* baseFolderPath) {
           }
           closedir(subDir);
           
-          // Parse the trailing digits
+          // Parse the trailing digits for event id #
           uint32_t eventId = (uint32_t)strtoul(entry->d_name + 8, NULL, 10);
           add_incident_to_list(eventId, fullPath, imgCount);
         }
       }
     }
   }
+  // free resources
   closedir(dir);
+  // log success
   ESP_LOGI(TAG, "Scan complete for %s. Total count: %d", baseFolderPath, get_pending_incident_count());
 }
 
@@ -137,6 +142,7 @@ void queue_incident_folders(const char* baseFolderPath) {
  */
 uint8_t remove_incident_node(uint32_t event_id) {
   uint8_t removed = FALSE;
+  // grab mutex, 100 ms timeout to prevent deadlocks
   if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
     IncidentNode* current = pendingIncidentsHead;
     IncidentNode* prev = NULL;
@@ -154,9 +160,11 @@ uint8_t remove_incident_node(uint32_t event_id) {
         removed = TRUE;
         break;
       }
+      // move the list along
       prev = current;
       current = current->next;
     }
+    //release mutex
     xSemaphoreGive(incidentMutex);
   }
   return removed;
@@ -166,18 +174,22 @@ uint8_t remove_incident_node(uint32_t event_id) {
 * Helper to clear and free the entire linked list (used during refresh)
 */
 void refresh_list(void) {
+  // gather the mutex
   if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
     IncidentNode* current = pendingIncidentsHead;
+    // clear all of the incidents from the list
     while (current != NULL) {
       IncidentNode* nextNode = current->next;
       free(current);
       current = nextNode;
     }
     pendingIncidentsHead = NULL;
+    // free the mutex
     xSemaphoreGive(incidentMutex);
   }
   
-  queue_incident_folders("/");
+  //attempt to queue in all the forms we've found for the root of sd card.
+  queue_incident_folders("/sd");
   vTaskDelay(pdMS_TO_TICKS(10));
   
   if (get_pending_incident_count() == 0) {
@@ -186,17 +198,23 @@ void refresh_list(void) {
   if (get_pending_incident_count() == 0) {
     queue_incident_folders("");
   }
+  if (get_pending_incident_count() == 0) {
+    queue_incident_folders("/");
+  }
 }
 
 /**
 * Helper to find target folder path by event ID from the linked list
 */
 const char* find_target_path(uint32_t event_id) {
+  // prep the buffer
   static char targetBuffer[MAX_PATH_LEN];
   targetBuffer[0] = '\0';
 
+  // snag the mutex so it doesn't get deleted in case
   if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
     IncidentNode* current = pendingIncidentsHead;
+    // search for matching id
     while (current != NULL) {
       if (current->eventId == event_id) {
         snprintf(targetBuffer, sizeof(targetBuffer), "%s", current->folderPath);
@@ -204,8 +222,10 @@ const char* find_target_path(uint32_t event_id) {
       }
       current = current->next;
     }
+    // release the mutex
     xSemaphoreGive(incidentMutex);
   }
+  // send back the path
   return targetBuffer;
 }
 
@@ -215,8 +235,10 @@ const char* find_target_path(uint32_t event_id) {
 */
 int get_pending_incident_count(void) {
   int count = 0;
+  // grab mutex so things don't randomly change
   if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
     IncidentNode* current = pendingIncidentsHead;
+    // counts
     while (current != NULL) {
       count++;
       current = current->next;
@@ -227,9 +249,10 @@ int get_pending_incident_count(void) {
 }
 
 /**
-* POSIX Recursive helper to clear files before removing directory
+* Recursive helper to clear files before removing directory
 */
 uint8_t remove_dir_recursive(const char *path) {
+  // attempt to open path
   DIR *dir = opendir(path);
   if (dir == NULL) {
     return FALSE;
@@ -239,7 +262,10 @@ uint8_t remove_dir_recursive(const char *path) {
   char filePath[MAX_PATH_LEN];
   uint8_t success = TRUE;
 
+  // check the path
   while ((entry = readdir(dir)) != NULL) {
+
+    // safety check
     if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
       continue;
     }
@@ -250,12 +276,16 @@ uint8_t remove_dir_recursive(const char *path) {
     }
 
     struct stat st;
+    // ok now we get into removing
     if (stat(filePath, &st) == 0) {
       if (S_ISDIR(st.st_mode)) {
+
+        // try to recurse through and deletesub directories
         if (remove_dir_recursive(filePath) == FALSE) {
           success = FALSE;
         }
       } else {
+        // remove individual files
         if (unlink(filePath) != 0) {
           ESP_LOGE(TAG, "Failed to unlink file: %s", filePath);
           success = FALSE;
@@ -263,8 +293,10 @@ uint8_t remove_dir_recursive(const char *path) {
       }
     }
   }
+  // safely clear out
   closedir(dir);
 
+  // report errors if needed but otherwise delete emptied directory
   if (rmdir(path) != 0) {
     ESP_LOGE(TAG, "Failed to remove directory: %s", path);
     success = FALSE;
@@ -332,25 +364,31 @@ uint8_t match_timestamp_in_csv(const char *incident_folder_path, uint32_t target
     return FALSE;
   }
 
+  // find the csv
   char csvPath[MAX_PATH_LEN];
   snprintf(csvPath, sizeof(csvPath), "%s/data.csv", incident_folder_path);
 
+  //open csv
   FILE *file = fopen(csvPath, "r");
   if (file == NULL) {
     ESP_LOGW(TAG, "Failed to open CSV file: %s", csvPath);
     return FALSE;
   }
 
+  // find the line
   char lineBuffer[64];
   uint8_t found = FALSE;
   uint32_t bestDiff = UINT32_MAX;
 
+  // get the line or run out of lines
   while (fgets(lineBuffer, sizeof(lineBuffer), file) != NULL) {
     uint32_t rowTs = 0;
     float rowDist = 0.0f;
 
+    // scan for what we're looking for
     if (sscanf(lineBuffer, "%" SCNu32 ",%f", &rowTs, &rowDist) != 2) continue;
 
+    // calculate difference
     uint32_t diff = (rowTs > target_ms) ? (rowTs - target_ms) : (target_ms - rowTs);
     if (diff < bestDiff) {
       bestDiff = diff;
@@ -361,14 +399,15 @@ uint8_t match_timestamp_in_csv(const char *incident_folder_path, uint32_t target
     }
   }
   fclose(file);
-
+  // return true if we found a match within tolerance, false otherwise
   return (found && bestDiff <= CSV_MATCH_TOLERANCE_MS) ? TRUE : FALSE;
 }
 
 /*
- * Helper for scanning directory. May need to be updated once we move to .cpp.
+ * Helper for scanning directory.
  */
 void scan_incident_directory(const char *incidentFolderPath) {
+  // open directory
   DIR *dir = opendir(incidentFolderPath);
   if (dir == NULL) {
     serial_print("scan_incident_directory: failed to open folder");
@@ -379,18 +418,21 @@ void scan_incident_directory(const char *incidentFolderPath) {
   while ((entry = readdir(dir)) != NULL) {
     if (entry->d_type != DT_REG || strstr(entry->d_name, ".jpg") == NULL) continue;
 
+    //attempt to get image ms 
     uint32_t imgMs = 0;
     if (!get_ms_from_image_title(entry->d_name, &imgMs)) continue;
 
     float distInch = 0.0f;
     char msg[512]; // Increased buffer size to prevent format truncation warnings
-    if (match_timestamp_in_csv(incidentFolderPath, imgMs, &distInch)) {
+    // match it and report back to logs
+    if (match_timestamp_in_csv(incidentFolderPath, imgMs, &distInch)) { // handles saving
       snprintf(msg, sizeof(msg), "%s -> %lu ms, %.2f in", entry->d_name, (unsigned long)imgMs, distInch);
     } else {
       snprintf(msg, sizeof(msg), "%s -> %lu ms, no CSV match", entry->d_name, (unsigned long)imgMs);
     }
     serial_print(msg);
   }
+  // bail from directory
   closedir(dir);
 }
 
@@ -414,26 +456,32 @@ uint8_t parse_incident_metadata(const char *incidentFolderPath) {
  * in data.csv. Returns the distance in cm and the image's ms.
  */
 uint8_t get_incident_event_metadata(const char *incident_folder_path, uint32_t *out_distance_cm, uint32_t *out_ms) {
+  // good safety check
   if (incident_folder_path == NULL || out_distance_cm == NULL || out_ms == NULL) {
     return FALSE;
   }
 
+  // get to where we need to be
   DIR *dir = opendir(incident_folder_path);
   if (dir == NULL) {
     ESP_LOGW(TAG, "Failed to open incident folder: %s", incident_folder_path);
     return FALSE;
   }
 
+  // setup up metadata support
   uint8_t haveApproach = FALSE, haveStart = FALSE;
   uint32_t approachMs = 0, startMs = 0;
   struct dirent *entry;
 
+  // parse through the data
   while ((entry = readdir(dir)) != NULL) {
     if (entry->d_type != DT_REG) continue;
 
+    //timestamp
     uint32_t ms = 0;
     if (!get_ms_from_image_title(entry->d_name, &ms)) continue;
 
+    // different images that we know about currently
     if (strncmp(entry->d_name, "image-approach-", 15) == 0) {
       approachMs = ms;
       haveApproach = TRUE;
@@ -442,8 +490,9 @@ uint8_t get_incident_event_metadata(const char *incident_folder_path, uint32_t *
       haveStart = TRUE;
     }
   }
-  closedir(dir);
+  closedir(dir); // close the directory
 
+  // parse ms elements?
   uint32_t eventMs;
   if (haveApproach) {
     eventMs = approachMs;
@@ -453,11 +502,13 @@ uint8_t get_incident_event_metadata(const char *incident_folder_path, uint32_t *
     return FALSE;
   }
 
+  // math yimestamp and get distance
   float distInch = 0.0f;
   if (!match_timestamp_in_csv(incident_folder_path, eventMs, &distInch)) {
     return FALSE;
   }
 
+  // update meta data
   *out_distance_cm = (uint32_t)(distInch * 2.54f + 0.5f);
   *out_ms = eventMs;
   return TRUE;
