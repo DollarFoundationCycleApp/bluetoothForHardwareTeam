@@ -53,48 +53,52 @@ static uint8_t build_child_path(char *dest, size_t dest_size, const char *parent
 }
 
 /**
- * Internal helper to safely insert or queue an incident node with a cached image count
+ * Inserts a node at the head of a private (not yet shared) list.
+ * No mutex needed: nobody else can see this list until it is swapped in.
+ * Duplicate event IDs are skipped.
  */
-static void add_incident_to_list(uint32_t eventId, const char* fullPath, uint32_t imageCount) {
-  if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-    uint8_t alreadyExists = FALSE;
-    IncidentNode* current = pendingIncidentsHead;
-    while (current != NULL) {
-      if (current->eventId == eventId) {
-        alreadyExists = TRUE;
-        break;
-      }
-      current = current->next;
+static void list_insert(IncidentNode** head, uint32_t eventId, const char* fullPath, uint32_t imageCount) {
+  for (IncidentNode* cur = *head; cur != NULL; cur = cur->next) {
+    if (cur->eventId == eventId) {
+      return;
     }
+  }
 
-    if (alreadyExists == FALSE) {
-      IncidentNode* newNode = (IncidentNode*)malloc(sizeof(IncidentNode));
-      if (newNode != NULL) {
-        newNode->eventId = eventId;
-        snprintf(newNode->folderPath, MAX_PATH_LEN, "%s", fullPath);
-        newNode->imageCount = imageCount;
-        newNode->active = TRUE;
-        
-        newNode->next = pendingIncidentsHead;
-        pendingIncidentsHead = newNode;
+  IncidentNode* newNode = (IncidentNode*)malloc(sizeof(IncidentNode));
+  if (newNode == NULL) {
+    ESP_LOGE(TAG, "Malloc failed for new incident node!");
+    return;
+  }
 
-        ESP_LOGI(TAG, "Queued incident folder: %s [EventId: %lu, Images: %lu]", fullPath, eventId, (unsigned long)imageCount);
-      } else {
-        ESP_LOGE(TAG, "Malloc failed for new incident node!");
-      }
-    }
-    xSemaphoreGive(incidentMutex);
+  newNode->eventId = eventId;
+  snprintf(newNode->folderPath, MAX_PATH_LEN, "%s", fullPath);
+  newNode->imageCount = imageCount;
+  newNode->active = TRUE;
+  newNode->next = *head;
+  *head = newNode;
+
+  ESP_LOGI(TAG, "Queued incident folder: %s [EventId: %lu, Images: %lu]",
+           fullPath, (unsigned long)eventId, (unsigned long)imageCount);
+}
+
+static void free_list(IncidentNode* head) {
+  while (head != NULL) {
+    IncidentNode* next = head->next;
+    free(head);
+    head = next;
   }
 }
 
 /**
- * Scan and populate the linked list queue from SD card using POSIX VFS
+ * Scans baseFolderPath for "incident*" folders and inserts them into *head.
+ * Returns TRUE if the base folder could be opened (even if it held no
+ * incidents), FALSE if it could not be opened at all.
  */
-void queue_incident_folders(const char* baseFolderPath) {
+static uint8_t scan_incident_folders_into(const char* baseFolderPath, IncidentNode** head) {
   DIR *dir = opendir(baseFolderPath);
   if (dir == NULL) {
     ESP_LOGW(TAG, "Failed to open base folder for scanning: %s", baseFolderPath);
-    return;
+    return FALSE;
   }
 
   struct dirent *entry;
@@ -107,7 +111,6 @@ void queue_incident_folders(const char* baseFolderPath) {
     if (strncasecmp(entry->d_name, "incident", 8) == 0) {
       char fullPath[MAX_PATH_LEN];
       if (build_child_path(fullPath, sizeof(fullPath), baseFolderPath, entry->d_name)) {
-        
         DIR *subDir = opendir(fullPath);
         if (subDir != NULL) {
           // Count images once during startup scan (avoiding runtime SD locks)
@@ -121,15 +124,49 @@ void queue_incident_folders(const char* baseFolderPath) {
             }
           }
           closedir(subDir);
-          
-          // Parse the trailing digits
+
           uint32_t eventId = (uint32_t)strtoul(entry->d_name + 8, NULL, 10);
-          add_incident_to_list(eventId, fullPath, imgCount);
+          list_insert(head, eventId, fullPath, imgCount);
         }
       }
     }
   }
   closedir(dir);
+  return TRUE;
+}
+
+/**
+ * Scan and add incident folders to the shared list (used at startup).
+ */
+void queue_incident_folders(const char* baseFolderPath) {
+  IncidentNode* scanned = NULL;
+  if (!scan_incident_folders_into(baseFolderPath, &scanned)) {
+    return;
+  }
+
+  if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+    while (scanned != NULL) {
+      IncidentNode* next = scanned->next;
+      uint8_t exists = FALSE;
+      for (IncidentNode* cur = pendingIncidentsHead; cur != NULL; cur = cur->next) {
+        if (cur->eventId == scanned->eventId) {
+          exists = TRUE;
+          break;
+        }
+      }
+      if (exists) {
+        free(scanned);
+      } else {
+        scanned->next = pendingIncidentsHead;
+        pendingIncidentsHead = scanned;
+      }
+      scanned = next;
+    }
+    xSemaphoreGive(incidentMutex);
+  } else {
+    ESP_LOGW(TAG, "Could not lock incident list; scan of %s discarded", baseFolderPath);
+    free_list(scanned);
+  }
   ESP_LOGI(TAG, "Scan complete for %s. Total count: %d", baseFolderPath, get_pending_incident_count());
 }
 
@@ -164,31 +201,38 @@ uint8_t remove_incident_node(uint32_t event_id) {
 }
 
 /**
-* Helper to clear and free the entire linked list (used during refresh)
-*/
+ * Rebuilds the incident list from the SD card. The new list is built on the
+ * side and swapped in under the mutex, so lookups never see an empty or
+ * half-built list. If the SD card can't be read at all, the old list is kept.
+ */
 void refresh_list(void) {
-  if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-    IncidentNode* current = pendingIncidentsHead;
-    while (current != NULL) {
-      IncidentNode* nextNode = current->next;
-      free(current);
-      current = nextNode;
+  const char* bases[] = { INCIDENT_BASE_PATH, "/", "./", "" };
+  IncidentNode* fresh = NULL;
+  uint8_t anyOpened = FALSE;
+
+  for (size_t i = 0; i < sizeof(bases) / sizeof(bases[0]); i++) {
+    if (scan_incident_folders_into(bases[i], &fresh)) {
+      anyOpened = TRUE;
     }
-    pendingIncidentsHead = NULL;
+    if (fresh != NULL) {
+      break;  // found incidents, so skip the fallback paths
+    }
+  }
+
+  if (!anyOpened) {
+    ESP_LOGE(TAG, "Refresh failed: no base folder could be opened; keeping previous incident list");
+    return;
+  }
+
+  if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+    IncidentNode* old = pendingIncidentsHead;
+    pendingIncidentsHead = fresh;
     xSemaphoreGive(incidentMutex);
-  }
-  
-  queue_incident_folders(INCIDENT_BASE_PATH);
-  vTaskDelay(pdMS_TO_TICKS(10));
-  
-  if (get_pending_incident_count() == 0) {
-    queue_incident_folders("/");
-  }
-  if (get_pending_incident_count() == 0) {
-    queue_incident_folders("./");
-  }
-  if (get_pending_incident_count() == 0) {
-    queue_incident_folders("");
+    ESP_LOGI(TAG, "Refresh complete: swapped in rebuilt incident list");
+    free_list(old);
+  } else {
+    ESP_LOGW(TAG, "Refresh skipped: could not lock incident list; keeping previous list");
+    free_list(fresh);
   }
 }
 

@@ -27,7 +27,7 @@ void notify_phone_of_event(uint32_t eventId, uint32_t distanceCm, uint32_t timeO
 //Button
 const int buttonPin = 4;
 unsigned long lastButtonPressMs = 0;
-const unsigned long debounceDelayMs = 200; // 200ms debounce
+const unsigned long debounceDelayMs = AUSTIN_COMPILES ? 2000 : 200; // 200ms debounce
 //uint32_t testEventId = 1; //100;
 
 
@@ -771,10 +771,11 @@ void loop() {
                 millis(),                                // time_offset_ms
                 1,                                       // image_count
                 IDBC_ImageFormat_IMAGE_FORMAT_JPEG       // image_format
-            ); // */
+            );
+            // */
             // /*
             // Test image transfer over proto
-            runTransferTest((uint32_t)11, (uint8_t)0);
+            //runTransferTest((uint32_t)11, (uint8_t)0);
             // */
         } else {
             Serial.println("Button pressed, but BLE is not connected!");
