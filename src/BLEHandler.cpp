@@ -1,39 +1,25 @@
-#include "BLEHandler.h"
-#include "IncidentManager.h"
-#include "ImageChunker.h"
-#include "sdkconfig.h"
-
-// --- Nanopb Includes ---
-#include "Nanopb/pb_decode.h"
-#include "Nanopb/pb_encode.h"
-#include "Nanopb/pb.h"
-#include "Nanopb/pb_common.h"
-#include "IBDC_v0.3.2.pb.h"
-
-#include "esp_bt.h"
-#include "esp_timer.h"
-#include <cstdio>
-#include <cstring>
-#include <string>
-#include <esp_log.h>
-#include <dirent.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
-// ESP-IDF / NimBLE C Host APIs
-#include "nimble/ble.h"
-#include "esp_nimble_hci.h"
-#include "nimble/nimble_port.h"
-#include "nimble/nimble_port_freertos.h"
-#include "host/ble_hs.h"
-#include "host/ble_gatt.h"
-#include "services/gap/ble_svc_gap.h"
-#include "services/gatt/ble_svc_gatt.h"
-#include "nvs_flash.h"
-#include "nvs.h"
+/**
+ * @file BLEHandler.cpp
+ * @author Jacob Dirks and Austin Hale
+ * @brief Bluetooth Low Energy (BLE) Server Implementation using ESP-IDF and NimBLE.
+ * 
+ * This module manages:
+ * - BLE GAP/GATT server initialization, security bonding, and advertising.
+ * - Standard HID keyboard reporting service (used to establish trusted OS-level phone pairing).
+ * - Custom 128-bit UUID service for bidirectional Protocol Buffer (Nanopb) messaging.
+ * - Non-blocking background image chunk streaming from SD card incident directories.
+ * - Persistent storage of recent connected device MAC addresses in NVS flash.
+ * @version 4.0
+ * @date 11/15/26
+ * 
+ * @copyright Copyright (c) 2026
+ * 
+ */
+#include "BLEHandler.h" // attempted to move all the includes into the .h
 
 #define TAG "BLE_HANDLER"
 
+// critical elements that allow us to connect to communication channels
 #define SERVICE_UUID_DATA "D4A51F4B-93EF-4AB1-B2B6-0E445CC297BA"
 #define CHARACTERISTIC_UUID_RX "D4A51F4C-93EF-4AB1-B2B6-0E445CC297BA"
 #define CHARACTERISTIC_UUID_TX "D4A51F4D-93EF-4AB1-B2B6-0E445CC297BA"
@@ -42,13 +28,15 @@
 #undef ESP_LOGW
 #undef ESP_LOGE
 
-//todo delete this before prod
+//this is a logging tool that shouldn't be needed in production.
 extern "C" void serial_print(const char* str);
 
+//custom wrappers to work with PlatformIO and presumably Arduino with minimal updates.
 #define ESP_LOGI(tag, format, ...) { char buf[512]; snprintf(buf, sizeof(buf), "[INFO] " format, ##__VA_ARGS__); serial_print(buf); }
 #define ESP_LOGW(tag, format, ...) { char buf[512]; snprintf(buf, sizeof(buf), "[WARN] " format, ##__VA_ARGS__); serial_print(buf); }
 #define ESP_LOGE(tag, format, ...) { char buf[512]; snprintf(buf, sizeof(buf), "[ERROR] " format, ##__VA_ARGS__); serial_print(buf); }
 
+// sync status and communication queues (prevents a lot of stack canaries)
 static uint8_t ble_is_synced = FALSE;
 typedef struct {
   uint16_t len;
@@ -56,7 +44,22 @@ typedef struct {
 } BleIncomingPacket;
 QueueHandle_t bleCmdQueue = NULL;
 
-// --- Custom UUIDs for Data/File Transfers (Little-Endian format for raw C structs) ---
+// Persistent streaming state struct (keeps stack footprint minimal and unblocked)
+typedef struct {
+  uint32_t eventId;
+  char folderPath[MAX_PATH_LEN];
+  uint32_t currentImageIndex;
+  uint32_t currentChunk;
+  uint32_t totalChunks;
+  FILE *file;
+  uint32_t lastChunkSendMs;
+  uint8_t active;
+} ActiveStreamContext;
+
+static ActiveStreamContext activeStream = {0};
+
+// --- Custom UUIDs for Data/File Transfers (Little-Endian format) ---
+// should be same as above set
 static const ble_uuid128_t uuid_service_data = BLE_UUID128_INIT(
   0xBA, 0x97, 0xC2, 0x5C, 0x44, 0x0E, 0xB6, 0xB2, 
   0xB1, 0x4A, 0xEF, 0x93, 0x4B, 0x1F, 0xA5, 0xD4
@@ -89,36 +92,10 @@ QueueHandle_t bleImageReqQueue = NULL;
 char recentDevices[MAX_SAVED_DEVICES][MAC_STR_LEN]; 
 int savedDeviceCount = 0;
 uint16_t tx_val_handle = 0;
-/*
-static bool build_child_path(char *dest, size_t dest_size, const char *parent, const char *child) {
-    size_t parent_len = std::strlen(parent);
-    size_t child_len = std::strlen(child);
-    size_t prefix_len = parent_len;
-    size_t separator_len = parent_len > 0 && parent[parent_len - 1] != '/' ? 1 : 0;
-
-    if (parent_len == 0) {
-        dest[0] = '/';
-        prefix_len = 1;
-    } else if (parent_len == 1 && parent[0] == '/') {
-        prefix_len = 1;
-    }
-
-    if (prefix_len + separator_len + child_len + 1 > dest_size) {
-        return false;
-    }
-
-    if (parent_len > 0) {
-        std::memcpy(dest, parent, prefix_len);
-    }
-    if (separator_len > 0) {
-        dest[prefix_len++] = '/';
-    }
-    std::memcpy(dest + prefix_len, child, child_len + 1);
-    return true;
-} // end ai suggested helper */  
 static uint32_t imagesPerEventSetting = 0;
 
 // Minimal HID Keyboard Report Descriptor (Enables OS-level phone pairing)
+// also this service keeps us connected for long term operations even if an event doesn't occur right away
 static const uint8_t hidReportDescriptor[] = {
   0x05, 0x01, // USAGE_PAGE (Generic Desktop)
   0x09, 0x06, // USAGE (Keyboard)
@@ -146,9 +123,11 @@ static void start_advertising(void);
 static void handle_protobuf_command(const IDBC_AppToDevice* appCmd);
 static uint8_t send_device_to_app_response(const IDBC_DeviceToApp* response);
 
+
+// HID characteristic and descriptor callbacks
 static int hid_info_access_cb(uint16_t handle, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg) {
     if (!ctxt || !ctxt->om) return 0; 
-    const uint8_t hidInfoVal[] = {0x11, 0x01, 0x00, 0x02};
+    const uint8_t hidInfoVal[] = {0x11, 0x01, 0x00, 0x02}; // hid version 1.11, country code 0, flags 2 (remote wake, normally connectable)
     return os_mbuf_append(ctxt->om, hidInfoVal, sizeof(hidInfoVal)) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
@@ -160,7 +139,7 @@ static int hid_report_map_access_cb(uint16_t handle, uint16_t attr, struct ble_g
 static int hid_protocol_mode_access_cb(uint16_t handle, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg) {
     if (!ctxt || !ctxt->om) return 0;
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        uint8_t mode = 0x01;
+        uint8_t mode = 0x01; // report protocol mode (not entirely sure what that means)
         return os_mbuf_append(ctxt->om, &mode, sizeof(mode)) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
     return 0;
@@ -169,7 +148,7 @@ static int hid_protocol_mode_access_cb(uint16_t handle, uint16_t attr, struct bl
 static int hid_report_ref_access_cb(uint16_t handle, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg) {
     if (!ctxt || !ctxt->om) return 0;
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_DSC) {
-        uint8_t refVal[] = {0x01, 0x01};
+        uint8_t refVal[] = {0x01, 0x01}; // report id 1: input
         return os_mbuf_append(ctxt->om, refVal, sizeof(refVal)) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
     return 0;
@@ -187,11 +166,14 @@ static int hid_input_report_access_cb(uint16_t handle, uint16_t attr, struct ble
 static int tx_characteristic_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                                      struct ble_gatt_access_ctxt *ctxt, void *arg) {
     if (!ctxt) return BLE_ATT_ERR_INVALID_HANDLE;
-    return 0;
+    return 0; // tx is notify only, direct reading is handled by NimBLE
 }
 
 
-
+/**
+ * Gatt rx characteristic callback: handles incoming write requests from the connection
+ * vallidates payload lengths, flattens the packet, gets it to us in a usable format.
+ */
 static int rx_characteristic_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                                      struct ble_gatt_access_ctxt *ctxt, void *arg) {
   if (!ctxt || !ctxt->om) {
@@ -210,7 +192,7 @@ static int rx_characteristic_access_cb(uint16_t conn_handle, uint16_t attr_handl
     return BLE_ATT_ERR_UNLIKELY;
   }
 
-  if (bleCmdQueue) {
+  if (bleCmdQueue) { // nonblocking but pushes it into our command queue
     xQueueSend(bleCmdQueue, &packet, 0);
   }
 
@@ -218,7 +200,7 @@ static int rx_characteristic_access_cb(uint16_t conn_handle, uint16_t attr_handl
 }
 
 
-// --- GATT Server Table ---
+// --- GATT Server Table Definitions---
 static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
   {
     /* Service 1: Standard Bluetooth SIG HID Service (0x1812) */
@@ -301,6 +283,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg) {
         ESP_LOGI(TAG, ">>> CONNECTED NATIVELY! Address: %s <<<", clientMac);
         save_device_address(clientMac);
 
+        // request optimized connection parameters for faster data transfer
         struct ble_gap_upd_params params = {
             .itvl_min = 24,  // 30ms
             .itvl_max = 40,  // 50ms
@@ -342,6 +325,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg) {
       }
       break;
       
+    // this section was added when transfering to .cpp but ultimately is a failsafe.
     case BLE_GAP_EVENT_PASSKEY_ACTION:
       {
           struct ble_sm_io pkey = {};
@@ -352,7 +336,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg) {
               ble_sm_inject_io(event->passkey.conn_handle, &pkey);
               ESP_LOGI(TAG, "Numeric comparison accepted automatically.");
           } else if (pkey.action == BLE_SM_IOACT_DISP) {
-              pkey.passkey = 123456; 
+              pkey.passkey = 123456; // default passkey for display pairing 
               ble_sm_inject_io(event->passkey.conn_handle, &pkey);
               ESP_LOGI(TAG, "Display passkey injected: 123456");
           }
@@ -365,6 +349,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg) {
   return 0;
 }
 
+// Runs the nimble port event loop within freeRTOS
 static void nimble_host_task(void *param) {
   ESP_LOGI(TAG, "NimBLE host task entered");
   nimble_port_run();
@@ -375,16 +360,18 @@ static void on_stack_reset(int reason) {
   ESP_LOGW(TAG, "NimBLE host reset, reason: %d", reason);
 }
 
+// executes when NimBLE stack syncs with Bluetooth controllers
+// syncs name and advertising
 static void on_stack_sync(void) {
     serial_print("[ble debug] CALLBACK: entered on_stack_sync");
     ble_is_synced = TRUE;
     
-    ble_svc_gap_device_name_set(DEVICE_NAME);
+    ble_svc_gap_device_name_set(DEVICE_NAME); // set the name
     ble_svc_gap_device_appearance_set(0x03C1);
 
     ESP_LOGI(TAG, "[BLE RUNTIME CONFIG] Free MSYS_1 blocks: %d", (int)os_msys_num_free());
     ESP_LOGI(TAG, "[BLE CONFIG] Active MSYS1 Block Size: %d bytes", CONFIG_BT_NIMBLE_MSYS_1_BLOCK_SIZE);
-    start_advertising();
+    start_advertising(); // start advertising
     serial_print("[ble debug] stack synced & advertising started");
 }
 
@@ -397,17 +384,83 @@ static void ble_app_on_reset(int reason) {
   ESP_LOGW(TAG, "NimBLE host reset, reason: %d", reason);
 }
 
+/**
+ * Background FreeRTOS task to deal with bluetooth background procedures
+ * Yielding is necessary and it should be pinned to a core that doesn't run the detection algorithim.
+ */
 static void ble_background_task(void *pvParameters) {
   while (true) {
     if (deviceConnected && notificationsEnabled) {
       handle_pending_bluetooth_tasks();
     }
-    vTaskDelay(pdMS_TO_TICKS(15)); // Yield generously to keep Core 0 free
+    vTaskDelay(pdMS_TO_TICKS(15)); // Yield generously to keep assigned Core free
   }
 }
 
 /**
- * Main initialization routine for BLE, queues, and security policies.
+ * Configures advertising parameters and starts broadcasting.
+ */
+static void start_advertising(void) {
+    if (!ble_is_synced) return;
+
+    // debug line
+    serial_print("[BLE Debug] Entering start_advertising()");
+    
+    ble_gap_adv_stop(); // stop the advanced features
+    struct ble_hs_adv_fields fields; // start setting the fileds I need to set
+    std::memset(&fields, 0, sizeof(fields));
+
+    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+
+    const char *name = ble_svc_gap_device_name();
+    if (name) {
+        fields.name = (uint8_t *)name;
+        fields.name_len = std::strlen(name);
+        fields.name_is_complete = 1;
+    }
+
+    int rc = ble_gap_adv_set_fields(&fields);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "[BLE Error] Failed to set adv fields, rc = %d", rc);
+        return;
+    }
+
+    // Set scan response fields to include our custom 128-bit data transfer service UUID
+    struct ble_hs_adv_fields rsp_fields;
+    std::memset(&rsp_fields, 0, sizeof(rsp_fields));
+    rsp_fields.uuids128 = (ble_uuid128_t *)&uuid_service_data;
+    rsp_fields.num_uuids128 = 1;
+    rsp_fields.uuids128_is_complete = 1;
+    // check our setup so we fail quickly
+    rc = ble_gap_adv_rsp_set_fields(&rsp_fields);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "[BLE Warning] Failed to set scan response fields, rc = %d", rc);
+    }
+
+    struct ble_gap_adv_params adv_params;
+    std::memset(&adv_params, 0, sizeof(adv_params));
+    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
+    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+
+    rc = ble_gap_adv_start(
+        BLE_OWN_ADDR_PUBLIC,
+        NULL,
+        BLE_HS_FOREVER,
+        &adv_params,
+        gap_event_handler,
+        NULL
+    );
+
+    if (rc != 0) {
+        ESP_LOGE(TAG, "[BLE Error] Failed to start advertising, rc = %d", rc);
+    } else {
+        ESP_LOGI(TAG, "[BLE Debug] Advertising started cleanly with name and 128-bit UUIDs!");
+    }
+}
+
+/**
+ * Main initialization routine for BLE: sets up NVS, releases Classic BT memory,
+ * configures security policies, registers GATT services, and launches background tasks.
  */
 void init_ble(void) { 
   esp_log_level_set("*", ESP_LOG_VERBOSE);
@@ -416,12 +469,14 @@ void init_ble(void) {
 
   ESP_LOGI(TAG, "[ble debug] start of init");
 
+  //initialize NVS flash for persistent storage of bonded devices
   esp_err_t ret = nvs_flash_init();
   if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     nvs_flash_erase();
     nvs_flash_init();
   }
   
+  //release classic blueooth memory since we are BLE_only (shouldn't be needed but has helped with stack canaries)
   esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
 
   ESP_LOGI(TAG, "[ble debug] Starting mutex and queue creations");
@@ -431,12 +486,14 @@ void init_ble(void) {
 
   ESP_LOGI(TAG, "[ble debug] Starting ble service creations");
 
+  // start the ports and services
   nimble_port_init();
   ble_svc_gap_init();
   ble_svc_gatt_init();
   int rc = ble_svc_gap_device_name_set(DEVICE_NAME);
   assert(rc == 0);
   
+  //configure the security manager settings for pairing and communication standards
   ble_hs_cfg.reset_cb = ble_app_on_reset;
   ble_hs_cfg.sync_cb = ble_app_on_sync;
   ble_hs_cfg.sm_bonding = 1;
@@ -444,9 +501,11 @@ void init_ble(void) {
   ble_hs_cfg.sm_mitm = 0;
   ble_hs_cfg.sm_sc = 1;
 
+  // actually load and then output a log of devices
   load_saved_devices();
   print_saved_devices();
 
+  // double checks added to ensure things were configured correctly
   rc = ble_gatts_count_cfg(gatt_svr_svcs);
   assert(rc == 0);
 
@@ -455,16 +514,22 @@ void init_ble(void) {
   
   vTaskDelay(pdMS_TO_TICKS(100));
 
-    ESP_LOGI(TAG, "[ble debug] Starting visible services.");
+  // debug tags
+  ESP_LOGI(TAG, "[ble debug] Starting visible services.");
 
+  // send task to FreeRTOS handling
   nimble_port_freertos_init(nimble_host_task); 
 
+  // quietly queue remaining incidents in the sd card if we lost power
   queue_incident_folders("/sd");
 
+  // unlock the device
   deviceReady = TRUE;
+
   ESP_LOGI(TAG, "========================================");
   ESP_LOGI(TAG, "BLE Server Started: %s", DEVICE_NAME);
   ESP_LOGI(TAG, "========================================");
+  // pin bluetooth to a core with a dedicated stack size
   xTaskCreatePinnedToCore(ble_background_task, "BleTask", 4096, NULL, 2, NULL, 0);
 }
 
@@ -477,25 +542,28 @@ void load_saved_devices(void) {
     recentDevices[i][0] = '\0';
   }
 
+  // attempt to get the file
   nvs_handle_t nvs_handle;
   esp_err_t err = nvs_open("ble_devices", NVS_READWRITE, &nvs_handle);
   if (err != ESP_OK) {
     return;
   }
 
+  // count previous devices
   int32_t count = 0;
   if (nvs_get_i32(nvs_handle, "count", &count) == ESP_OK) {
     savedDeviceCount = (count > MAX_SAVED_DEVICES) ? MAX_SAVED_DEVICES : count;
     char keyBuf[16];
     for (int i = 0; i < savedDeviceCount; i++) {
       std::snprintf(keyBuf, sizeof(keyBuf), "dev_%d", i);
-      
+      // log the ones we want in a set amount
       size_t required_size = MAC_STR_LEN;
       if (nvs_get_str(nvs_handle, keyBuf, recentDevices[i], &required_size) != ESP_OK) {
         recentDevices[i][0] = '\0';
       }
     }
   }
+  // close the file (don't need a semaphore because connection can't occur when it's called)
   nvs_close(nvs_handle);
 }
 
@@ -506,6 +574,7 @@ void save_device_address(const char* macAddr) {
   if (macAddr == NULL || macAddr[0] == '\0') return;
 
   int existingIdx = -1;
+  // adds a device to our power cycle memory
   for (int i = 0; i < MAX_SAVED_DEVICES; i++) {
     if (strcasecmp(recentDevices[i], macAddr) == 0) {
       existingIdx = i;
@@ -513,6 +582,7 @@ void save_device_address(const char* macAddr) {
     }
   }
 
+  // shift existing entries down
   int shiftEnd = (existingIdx != -1) ? existingIdx : (MAX_SAVED_DEVICES - 1);
   for (int i = shiftEnd; i > 0; i--) {
     std::memcpy(recentDevices[i], recentDevices[i - 1], MAC_STR_LEN);
@@ -523,6 +593,7 @@ void save_device_address(const char* macAddr) {
     savedDeviceCount++;
   }
 
+  // attempt to save it to the nvs storage
   nvs_handle_t nvs_handle;
   if (nvs_open("ble_devices", NVS_READWRITE, &nvs_handle) == ESP_OK) {
     nvs_set_i32(nvs_handle, "count", savedDeviceCount);
@@ -531,6 +602,7 @@ void save_device_address(const char* macAddr) {
       std::snprintf(keyBuf, sizeof(keyBuf), "dev_%d", i);
       nvs_set_str(nvs_handle, keyBuf, recentDevices[i]);
     }
+    // actually save our updates
     nvs_commit(nvs_handle);
     nvs_close(nvs_handle);
   }
@@ -564,7 +636,7 @@ static uint8_t send_device_to_app_response(const IDBC_DeviceToApp* response) {
 
   pb_ostream_t stream = pb_ostream_from_buffer(buffer, 512);
   if (!pb_encode(&stream, IDBC_DeviceToApp_fields, response)) {
-    std::free(buffer);
+    std::free(buffer); 
     return FALSE;
   }
 
@@ -588,7 +660,7 @@ void notify_phone_of_event(uint32_t eventId, uint32_t distanceCm, uint32_t timeO
   // Use static to keep large Nanopb structs off the stack
   static IDBC_DeviceToApp msg;
   msg = (IDBC_DeviceToApp)IDBC_DeviceToApp_init_default;
-  
+  // attempt to build information we know for this one
   msg.which_payload = IDBC_DeviceToApp_event_notification_tag;
   msg.payload.event_notification.event_id = eventId;
   msg.payload.event_notification.distance_cm = distanceCm;
@@ -596,30 +668,38 @@ void notify_phone_of_event(uint32_t eventId, uint32_t distanceCm, uint32_t timeO
   msg.payload.event_notification.image_count = imageCount;
   msg.payload.event_notification.image_format = (IDBC_ImageFormat)format;
 
-  send_device_to_app_response(&msg);
+  send_device_to_app_response(&msg); // send event_notification protobuf message
 }
 
 
 /**
- * Processes incoming protobuf AppToDevice requests.
+ * Processes incoming decoded Protocol Buffer (`AppToDevice`) requests from the application.
+ * Handles image transfer requests, event transfer ACKs (which trigger SD folder wiping), 
+ * metadata info requests, and device settings updates.
  */
 static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
-  if (!deviceReady) {
+  if (!deviceReady) { // are we locked out? if not then procede to connection
     ESP_LOGE(TAG, "[CRITICAL ERROR] Device was not ready to receive protobuf commands");
     return;
   }
 
+  // go through the cases
   switch (appCmd->which_payload) {
+    // image transfer protobuf
     case IDBC_AppToDevice_image_transfer_request_tag: {
       const IDBC_ImageTransferRequest* req = &appCmd->payload.image_transfer_request;
+      // log it for debugging
       ESP_LOGI(TAG, "Proto Req: Transfer Image - Event ID: %lu", (unsigned long)req->event_id);
       
+      // find our target path is possible
       const char* targetFolder = find_target_path(req->event_id);
       if (targetFolder == NULL || std::strlen(targetFolder) == 0) {
+      // report failure
         ESP_LOGW(TAG, "[BLE Error] Failed to find target folder for Event ID %lu", (unsigned long)req->event_id);
         break;
       }
 
+      // build the request and load its items into the queue for the background task to process
       PendingImageRequest reqItem;
       reqItem.active = TRUE;
       reqItem.eventId = req->event_id;
@@ -630,15 +710,17 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
       // Brief yield before enqueuing to let radio buffer clear
       vTaskDelay(pdMS_TO_TICKS(20));
 
+      // send it off to the queue
       if (xQueueSend(bleImageReqQueue, &reqItem, 0) != pdTRUE) {
         ESP_LOGE(TAG, "[BLE ERROR] Image request queue is full!");
       }
       break;
     }
     
+    // event transfer success
     case IDBC_AppToDevice_event_transfer_ack_tag: {
       const IDBC_EventTransferAck* ack = &appCmd->payload.event_transfer_ack;
-      
+      // see if we can't find the path for the folder we need to clear
       const char* folderPath = find_target_path(ack->event_id);
       if (folderPath == NULL || std::strlen(folderPath) == 0) { 
         ESP_LOGW(TAG, "[BLE WARNING] Received ACK for Event ID %lu, but it wasn't found.", (unsigned long)ack->event_id);
@@ -648,15 +730,18 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
       char folderPathCopy[64];
       std::snprintf(folderPathCopy, sizeof(folderPathCopy), "%s", folderPath);
       
+      // clear the event from our list
       remove_incident_node(ack->event_id);
       vTaskDelay(pdMS_TO_TICKS(50));
         
-      uint8_t deleted = FALSE;
+      uint8_t deleted = FALSE; // semaphore issues
       for (int attempt = 0; attempt < 3 && deleted == FALSE; attempt++) {
         if (attempt > 0) vTaskDelay(pdMS_TO_TICKS(100));
+        // Remove it from the sd card
         deleted = remove_dir_recursive(folderPathCopy);
       }
 
+      // log output
       if (deleted == TRUE) {
         ESP_LOGI(TAG, "[SD] Successfully wiped acknowledged directory: %s", folderPathCopy);
       } else {
@@ -665,16 +750,17 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
       break;
     }
 
+    // request event information protobuf
     case IDBC_AppToDevice_event_info_request_tag: {
       const IDBC_EventInfoRequest* infoReq = &appCmd->payload.event_info_request;
-      
+      // build details in local memory
       uint32_t imgCount = 0;
       uint32_t distanceCm = 0;
       uint32_t timeOffsetMs = 0;
       uint32_t eventMs = 0;
       bool found = false;
 
-      // Safely look up cached image count from memory list
+      // Safely look up cached image count from memory list with semaphore
       if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         IncidentNode* current = pendingIncidentsHead;
         while (current != NULL) {
@@ -691,6 +777,7 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
           }
           current = current->next;
         }
+        //release semaphore
         xSemaphoreGive(incidentMutex);
       }
 
@@ -698,9 +785,10 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
         ESP_LOGW(TAG, "[BLE WARNING] Requested event info for an ID not found.");
         break;
       }
-
+      // snag the details and send them back a log
       ESP_LOGI(TAG, "[T#116] event %lu: distance=%lu cm, offset=%lu ms", (unsigned long)infoReq->event_id, (unsigned long)distanceCm, (unsigned long)timeOffsetMs);
       
+      // send details back to phone
       notify_phone_of_event(
         infoReq->event_id, 
         distanceCm, 
@@ -711,6 +799,7 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
       break;
     }
 
+    // settings protobuf but this feature goes beyond blueooth scope and is not added yet.
     case IDBC_AppToDevice_settings_tag: {
       imagesPerEventSetting = appCmd->payload.settings.images_per_event;
       ESP_LOGI(TAG, "Settings received: images_per_event=%lu", (unsigned long)imagesPerEventSetting);
@@ -728,34 +817,22 @@ static void handle_protobuf_command(const IDBC_AppToDevice* appCmd) {
       break;
     }*/
 
-     
-
     default:
+      ESP_LOGE(TAG, "ERROR Unexpected protobuf command received: %d", appCmd->which_payload);
       break;
   }
 }
 
-// Persistent streaming state struct (keeps stack footprint minimal and unblocked)
-typedef struct {
-  uint32_t eventId;
-  char folderPath[MAX_PATH_LEN];
-  uint32_t currentImageIndex;
-  uint32_t currentChunk;
-  uint32_t totalChunks;
-  FILE *file;
-  uint32_t lastChunkSendMs;
-  uint8_t active;
-} ActiveStreamContext;
-
-static ActiveStreamContext activeStream = {0};
 
 /**
  * Incremental, non-blocking task loop handler to process queued image transfers one chunk at a time.
  */
+
+ // WARNING it is a beefy method and probably could be split up just fine...
 void handle_pending_bluetooth_tasks(void) {
   if (!deviceReady) return;
 
-  // 1. Process incoming packet queue (non-blocking)
+  // Process incoming packet queue
   static BleIncomingPacket packet;
   if (bleCmdQueue && xQueueReceive(bleCmdQueue, &packet, 0) == pdTRUE) {
     static IDBC_AppToDevice appCmd;
@@ -770,7 +847,7 @@ void handle_pending_bluetooth_tasks(void) {
     }
   }
 
-  // 2. If no active stream, pull the next request from the queue and open the first file
+  // If no active stream, pull the next image request from the queue and open the file
   if (!activeStream.active) {
     PendingImageRequest reqItem;
     if (bleImageReqQueue && xQueueReceive(bleImageReqQueue, &reqItem, 0) == pdTRUE) {
@@ -800,7 +877,7 @@ void handle_pending_bluetooth_tasks(void) {
 
           if (foundPath != NULL) {
             FILE *f = std::fopen(foundPath, "rb");
-            std::free(foundPath); // Free path buffer immediately after open
+            std::free(foundPath); // Free path buffer after opening to prevent memory frags
 
             if (f != NULL) {
               std::fseek(f, 0, SEEK_END);
@@ -808,6 +885,7 @@ void handle_pending_bluetooth_tasks(void) {
               std::fseek(f, 0, SEEK_SET);
 
               if (fileSize > 0 && fileSize <= 1024 * 512) {
+                // send initial memory packet for app to be happy
                 static IDBC_DeviceToApp infoMsg;
                 infoMsg = (IDBC_DeviceToApp)IDBC_DeviceToApp_init_default;
                 infoMsg.which_payload = IDBC_DeviceToApp_image_info_tag;
@@ -818,7 +896,8 @@ void handle_pending_bluetooth_tasks(void) {
                 
                 send_device_to_app_response(&infoMsg);
                 vTaskDelay(pdMS_TO_TICKS(30));
-
+                
+                // initialize active stream context so we can send chunks
                 activeStream.eventId = reqItem.eventId;
                 std::snprintf(activeStream.folderPath, sizeof(activeStream.folderPath), "%s", reqItem.targetFolder);
                 activeStream.currentImageIndex = reqItem.startImage;
@@ -838,7 +917,7 @@ void handle_pending_bluetooth_tasks(void) {
     }
   }
 
-  // 3. If a stream is active, transmit ONE chunk when the pacing interval permits
+  // If a stream is active, transmit ONE chunk when the pacing interval permits
  if (activeStream.active) {
     if (!deviceConnected) {
       if (activeStream.file) std::fclose(activeStream.file);
@@ -851,16 +930,19 @@ void handle_pending_bluetooth_tasks(void) {
     if (now - activeStream.lastChunkSendMs >= 50) {
       activeStream.lastChunkSendMs = now;
 
+      // start building the chunk from the file
       size_t byteOffset = (size_t)activeStream.currentChunk * IMAGE_CHUNK_DATA_SIZE;
       std::fseek(activeStream.file, 0, SEEK_END);
       long fileSize = std::ftell(activeStream.file);
 
+        // ensure we don't read past the end of the file
       if (byteOffset < (size_t)fileSize) {
         size_t bytesToRead = IMAGE_CHUNK_DATA_SIZE;
         if (byteOffset + bytesToRead > (size_t)fileSize) {
           bytesToRead = (size_t)fileSize - byteOffset;
         }
 
+        // read the chunk into a static buffer to avoid stack overflow
         static uint8_t chunkWindowBuf[IMAGE_CHUNK_DATA_SIZE];
         std::fseek(activeStream.file, (long)byteOffset, SEEK_SET);
         size_t bytesRead = std::fread(chunkWindowBuf, 1, bytesToRead, activeStream.file);
@@ -868,6 +950,7 @@ void handle_pending_bluetooth_tasks(void) {
         static IDBC_ImageChunk chunkMsg;
         static IDBC_DeviceToApp resp;
 
+        // build the chunk message and send it
         if (buildImageChunkFromWindow(chunkWindowBuf, bytesRead, activeStream.eventId, activeStream.currentImageIndex, activeStream.currentChunk, activeStream.totalChunks, &chunkMsg)) {
           resp = (IDBC_DeviceToApp)IDBC_DeviceToApp_init_default;
           resp.which_payload = IDBC_DeviceToApp_image_chunk_tag;
@@ -875,16 +958,19 @@ void handle_pending_bluetooth_tasks(void) {
           
           // Send directly; send_device_to_app_response manages its own msys blocking/waiting safely
           send_device_to_app_response(&resp);
+          // log it
+          ESP_LOGI(TAG, "[BLE Stream] Sent chunk %lu/%lu for Event %lu, Image %lu", (unsigned long)activeStream.currentChunk, (unsigned long)activeStream.totalChunks, (unsigned long)activeStream.eventId, (unsigned long)activeStream.currentImageIndex);
         }
 
         // Only increment AFTER attempting to send the chunk
         activeStream.currentChunk++;
 
-        // When current image finishes, check for subsequent images in the folder
+        // When current image finishes, check for subsequent images in the folder to complete an event
         if (activeStream.currentChunk >= activeStream.totalChunks) {
           std::fclose(activeStream.file);
           activeStream.file = NULL;
 
+          // open the folder path look for images, if we find the next image, send its info to the phone and start streaming it
           DIR *dir = opendir(activeStream.folderPath);
           if (dir != NULL) {
             struct dirent *entry;
@@ -908,11 +994,11 @@ void handle_pending_bluetooth_tasks(void) {
             }
             closedir(dir);
 
-            if (nextPath != NULL) {
+            if (nextPath != NULL) { // something was found
               FILE *f = std::fopen(nextPath, "rb");
               std::free(nextPath);
 
-              if (f != NULL) {
+              if (f != NULL) { // item was a file / img
                 std::fseek(f, 0, SEEK_END);
                 long nextSize = std::ftell(f);
                 std::fseek(f, 0, SEEK_SET);
@@ -939,6 +1025,7 @@ void handle_pending_bluetooth_tasks(void) {
             }
           }
 
+          // whew final done... might want to split this one up soon
           ESP_LOGI(TAG, "[BLE Stream] Completed all images for Event %lu", (unsigned long)activeStream.eventId);
           std::memset(&activeStream, 0, sizeof(activeStream));
         }
@@ -951,73 +1038,16 @@ void handle_pending_bluetooth_tasks(void) {
 }
 
 /**
- * Configures advertising parameters and starts broadcasting.
- */
-static void start_advertising(void) {
-    if (!ble_is_synced) return;
-
-    serial_print("[BLE Debug] Entering start_advertising()");
-    
-    ble_gap_adv_stop();
-    struct ble_hs_adv_fields fields;
-    std::memset(&fields, 0, sizeof(fields));
-
-    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-
-    const char *name = ble_svc_gap_device_name();
-    if (name) {
-        fields.name = (uint8_t *)name;
-        fields.name_len = std::strlen(name);
-        fields.name_is_complete = 1;
-    }
-
-    int rc = ble_gap_adv_set_fields(&fields);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "[BLE Error] Failed to set adv fields, rc = %d", rc);
-        return;
-    }
-
-    struct ble_hs_adv_fields rsp_fields;
-    std::memset(&rsp_fields, 0, sizeof(rsp_fields));
-    rsp_fields.uuids128 = (ble_uuid128_t *)&uuid_service_data;
-    rsp_fields.num_uuids128 = 1;
-    rsp_fields.uuids128_is_complete = 1;
-
-    rc = ble_gap_adv_rsp_set_fields(&rsp_fields);
-    if (rc != 0) {
-        ESP_LOGW(TAG, "[BLE Warning] Failed to set scan response fields, rc = %d", rc);
-    }
-    struct ble_gap_adv_params adv_params;
-    std::memset(&adv_params, 0, sizeof(adv_params));
-    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
-    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
-
-    rc = ble_gap_adv_start(
-        BLE_OWN_ADDR_PUBLIC,
-        NULL,
-        BLE_HS_FOREVER,
-        &adv_params,
-        gap_event_handler,
-        NULL
-    );
-
-    if (rc != 0) {
-        ESP_LOGE(TAG, "[BLE Error] Failed to start advertising, rc = %d", rc);
-    } else {
-        ESP_LOGI(TAG, "[BLE Debug] Advertising started cleanly with name and 128-bit UUIDs!");
-    }
-}
-
-/**
- * Test method to help run transfer acknowledgments/simulations
+ * Test method to help run transfer acknowledgments/simulations (associated with button)
  */
 void runTransferTest(uint32_t num, uint8_t counter) {
+  // refresh the list of incidents because we want to ensure its fresh and nothing broke when adding 
   refresh_list();
     
-  if (counter == TRUE) {
+  if (counter == TRUE) { // can either do all incidents transfering
     int count = 0;
     ESP_LOGI(TAG, "[BLE TEST] Queuing transfer test for %d incidents...", (int)num);
-        
+        // send EVERYTHING
     if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
       IncidentNode* current = pendingIncidentsHead;
       while (current != NULL) {
@@ -1025,7 +1055,7 @@ void runTransferTest(uint32_t num, uint8_t counter) {
           break; 
         }
             
-        // Enqueue instead of calling stream_incident_images directly!
+        // Enqueue instead of calling stream_incident_images directly to bypass an element of the stack and avoid potential stack overflow issues
         PendingImageRequest reqItem;
         reqItem.active = TRUE;
         reqItem.eventId = current->eventId;
@@ -1042,11 +1072,12 @@ void runTransferTest(uint32_t num, uint8_t counter) {
       }
       xSemaphoreGive(incidentMutex);
     }
-  } else {
+  } else { // do a specific event
     ESP_LOGI(TAG, "[BLE TEST] Queuing transfer test for specific Event ID %lu...", (unsigned long)num);
         
     if (incidentMutex && xSemaphoreTake(incidentMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-      IncidentNode* current = pendingIncidentsHead;
+      // get all of our information
+      IncidentNode* current = pendingIncidentsHead; 
       while (current != NULL) {
         if (current->eventId == num) {
           PendingImageRequest reqItem;
@@ -1056,6 +1087,7 @@ void runTransferTest(uint32_t num, uint8_t counter) {
           reqItem.startChunk = 0;
           std::snprintf(reqItem.targetFolder, sizeof(reqItem.targetFolder), "%.*s", (int)(sizeof(reqItem.targetFolder) - 1), current->folderPath);
 
+          // add it to the queue to be handled asap
           if (bleImageReqQueue && xQueueSend(bleImageReqQueue, &reqItem, 0) == pdTRUE) {
             ESP_LOGI(TAG, "[BLE TEST] Queued specific Event ID %lu for transfer", (unsigned long)num);
           }
