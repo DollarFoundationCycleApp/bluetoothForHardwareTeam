@@ -145,6 +145,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg);
 static void start_advertising(void);
 static void handle_protobuf_command(const IDBC_AppToDevice* appCmd);
 static uint8_t send_device_to_app_response(const IDBC_DeviceToApp* response);
+static void abort_transfer_state(uint8_t dropQueuedRequests);
 
 static int hid_info_access_cb(uint16_t handle, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg) {
     if (!ctxt || !ctxt->om) return 0; 
@@ -401,6 +402,9 @@ static void ble_background_task(void *pvParameters) {
   while (true) {
     if (deviceConnected && notificationsEnabled) {
       handle_pending_bluetooth_tasks();
+    } else {
+      // Phone gone or unsubscribed: never resume a stale stream later.
+      abort_transfer_state(!deviceConnected);
     }
     vTaskDelay(pdMS_TO_TICKS(15)); // Yield generously to keep Core 0 free
   }
@@ -748,6 +752,24 @@ typedef struct {
 } ActiveStreamContext;
 
 static ActiveStreamContext activeStream = {0};
+
+static void abort_transfer_state(uint8_t dropQueuedRequests) {
+  if (activeStream.active) {
+    ESP_LOGW(TAG, "[BLE Stream] Aborted active stream for Event %lu (connection lost or notifications off)",
+             (unsigned long)activeStream.eventId);
+  }
+  if (activeStream.file) {
+    std::fclose(activeStream.file);
+  }
+  std::memset(&activeStream, 0, sizeof(activeStream));
+
+  // Requests queued for a phone that is gone shouldn't start on reconnect.
+  if (dropQueuedRequests && bleImageReqQueue) {
+    PendingImageRequest stale;
+    while (xQueueReceive(bleImageReqQueue, &stale, 0) == pdTRUE) {
+    }
+  }
+}
 
 /**
  * Incremental, non-blocking task loop handler to process queued image transfers one chunk at a time.

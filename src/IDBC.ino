@@ -17,8 +17,8 @@
 #include "IncidentManager.h"
 #include "IBDC_v0.3.2.pb.h"
 
-#define AUSTIN_COMPILES 1 // for jacob its 0 for austin its 1.
-#define ENABLE_CAMERA 0   // 0 = skip camera (BLE/log testing), 1 = normal
+#define AUSTIN_COMPILES 0 // for jacob its 0 for austin its 1.
+#define ENABLE_CAMERA 1   // 0 = skip camera (BLE/log testing), 1 = normal
 
 // Forward declarations for BLE symbols in Bluetooth
 extern uint8_t deviceConnected;
