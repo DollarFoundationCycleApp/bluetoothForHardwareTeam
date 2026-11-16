@@ -1,6 +1,14 @@
 #include "IncidentManager.h"
 #include "esp_log.h"
 
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <inttypes.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #define TAG "INCIDENT_MANAGER"
 #define CSV_MATCH_TOLERANCE_MS 100   // rows are ~20-55 ms apart
 extern void serial_print(const char* str);

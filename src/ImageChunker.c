@@ -3,12 +3,15 @@
 #include <string.h>
 #include <stdint.h>
 
-
+/**
+ * Detects the image format based on the first few bytes of the image data.
+ * Supports JPEG and PNG formats.
+ */
 bool detectImageFormat(
     const uint8_t* data,
     size_t size,
     IDBC_ImageFormat* format
-) {
+    ) {
     if (data == NULL || format == NULL) {
         return false;
     }
@@ -33,7 +36,10 @@ bool detectImageFormat(
     return false;
 }
 
-
+/**
+ * Calculates the total number of chunks required to send an image of a given size.
+ * Each chunk can contain up to IMAGE_CHUNK_DATA_SIZE bytes.
+ */
 size_t calculateTotalChunks(size_t imageSize) {
     if (imageSize == 0) {
         return 0;
@@ -42,7 +48,10 @@ size_t calculateTotalChunks(size_t imageSize) {
     return (imageSize + IMAGE_CHUNK_DATA_SIZE - 1) / IMAGE_CHUNK_DATA_SIZE;
 }
 
-
+/**
+ * Builds an IDBC_ImageChunk protobuf message and stores in a passed buffer from the given image data and metadata.
+ * Returns true on success, false on failure (e.g., invalid parameters).
+ */
 bool buildImageChunk(
     const ImageData* image,
     uint32_t eventId,
@@ -103,6 +112,10 @@ bool buildImageChunk(
     return true;
 }
 
+/**
+ * Builds an IDBC_ImageChunk protobuf message from a sliding window of image data.
+ * Returns true on success, false on failure.
+ */
 bool buildImageChunkFromWindow(
     const uint8_t* windowData,
     size_t dataSize,

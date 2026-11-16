@@ -17,6 +17,40 @@
  */
 #include "BLEHandler.h" // attempted to move all the includes into the .h
 
+#include "IncidentManager.h"
+#include "ImageChunker.h"
+#include "sdkconfig.h"
+
+// --- Nanopb Includes ---
+#include "Nanopb/pb_decode.h"
+#include "Nanopb/pb_encode.h"
+#include "Nanopb/pb.h"
+#include "Nanopb/pb_common.h"
+#include "IBDC_v0.3.2.pb.h"
+
+#include "esp_bt.h"
+#include "esp_timer.h"
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <esp_log.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+// ESP-IDF / NimBLE C Host APIs
+#include "nimble/ble.h"
+#include "esp_nimble_hci.h"
+#include "nimble/nimble_port.h"
+#include "nimble/nimble_port_freertos.h"
+#include "host/ble_hs.h"
+#include "host/ble_gatt.h"
+#include "services/gap/ble_svc_gap.h"
+#include "services/gatt/ble_svc_gatt.h"
+#include "nvs_flash.h"
+#include "nvs.h"
+
+
 #define TAG "BLE_HANDLER"
 
 // critical elements that allow us to connect to communication channels
