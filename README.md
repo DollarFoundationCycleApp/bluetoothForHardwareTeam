@@ -42,6 +42,30 @@ NanoPB has a repository that will allow developers to convert a .proto file into
 
 There are a lot of libraries associated esp_idf system and the alternative is arduino libraries or less effective memory optimizations that'll possibly cause a crash.
 
+## Edge Cases and Failure Behavior
+
+### Tested
+
+| Case | Behavior | Notes |
+|---|---|---|
+| App requests an image while the incident list is being rebuilt | The lookup uses the previous complete list. Image streams, ACK deletes the folder. | Before the fix this failed with `Failed to find target folder`. |
+| SD card can't be read during a list refresh | Logs `Refresh failed ... keeping previous incident list`. Existing list stays usable. | Tested by pointing `INCIDENT_BASE_PATH` at a nonexistent path. |
+| SD mount fails at boot | Makes up to 5 attempts. If all fail, the device reboots after 3 s. | Seen both ways: mounted on a later retry, and a full retry-fail reboot. |
+| Image transfer completes | App sends an ACK and the device deletes that incident folder. | An incident can only be transferred successfully once. Restore the folder from a backup between tests. |
+| Camera returns no frames | Capture fails fast and is not retried for 30 s. | Tested. Root cause of `cam_hal: FB-OVF` is still open. |
+| Second button press during a transfer (dev-board button) | A second event notification was sent into the active stream. | Mitigated with a 2 s debounce on the `AUSTIN_COMPILES` setting. |
+| Phone disconnects mid-transfer | Stream aborts, queued image requests are dropped, and the incident stays on the SD card. The next transfer works normally after reconnecting. | Before the fix, the old stream resumed after reconnect with no request or header, and the app discarded it. The app does not re-request the image on its own after reconnecting, so a new incident notification and request are needed. The queued-request drain was not tested separately. |
+
+### Known issues / not yet tested (from code)
+
+| Case | Expected | Concern |
+|---|---|---|
+| App requests an event ID that doesn't exist | Warning logged. | Device sends the app no reply, so the app keeps waiting. |
+| Incident folder has no images, or an image is empty or over 512 KB | Request is skipped. | Nothing is logged. |
+| Mutex timeout (50 ms) when reading the incident list | Operation is skipped. | Nothing is logged. |
+| ACK arrives during a list refresh | Folder is deleted. | The entry may reappear in the list until the next refresh. |
+| Phone goes to sleep while connected | Notification and transfer are delayed until it wakes. | Seen once, not reproduced with logs. |
+
 ## Image Chunker Demo
 
 The Image Chunker demo demonstrates how an image is:
