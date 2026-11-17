@@ -510,7 +510,7 @@ void init_ble(void) {
     nvs_flash_init();
   }
   
-  //release classic blueooth memory since we are BLE_only (shouldn't be needed but has helped with stack canaries)
+  //release classic bluetooth memory since we are BLE_only (shouldn't be needed but has helped with stack canaries)
   esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
 
   ESP_LOGI(TAG, "[ble debug] Starting mutex and queue creations");
