@@ -1,8 +1,8 @@
 name: Firmware CI Pipeline
 
 on:
-  push:
-    branches: [ main, master, US#54 ]
+  push: #once test suite is done remove the US#54 branch from this list
+    branches: [ main, master, dev, US#54 ]
   pull_request:
     branches: [ main, master ]
 
@@ -13,16 +13,20 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+        # needed to get platfromIO as platformIO is a python package
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
+          # allow Github to have access to platformio
       - name: Install PlatformIO Core
         run: pip install --upgrade platformio
 
+        # run the test file
       - name: Run Native Unit Tests
         run: pio test -e native
 
-      - name: Build Target Firmware
-        run: pio run -e seeed_xiao_esp32s3
+    # when we are ready to try and create deployment files to auto upload things this can be used
+    #  - name: Build Target Firmware
+    #    run: pio run -e seeed_xiao_esp32s3
