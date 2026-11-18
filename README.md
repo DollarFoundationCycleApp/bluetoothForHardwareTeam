@@ -42,6 +42,84 @@ NanoPB has a repository that will allow developers to convert a .proto file into
 
 There are a lot of libraries associated esp_idf system and the alternative is arduino libraries or less effective memory optimizations that'll possibly cause a crash.
 
+## Sequence Diagrams
+Steps marked *(planned)* are the intended design and are not yet implemented.
+
+### 1. Detecting and notifying (during a ride)
+
+```mermaid
+sequenceDiagram
+autonumber
+participant Main as Main Loop
+participant ST as StorageTask
+participant IM as IncidentManager
+participant BLE as BLEHandler
+participant App as Phone App
+
+Note over IM,BLE: At boot, saved incidents on the SD card are scanned into a pending list
+Main->>Main: Detector confirms an incident
+Main->>ST: CMD_INCIDENT_CONFIRMED
+ST->>ST: Save images and data.csv to RecordedDataN/incidentM
+ST->>IM: Add to pending list (planned)
+ST->>BLE: Send notification (planned: automatic)
+alt Phone connected and subscribed
+    BLE->>App: EventNotification
+else Phone not connected
+    Note over BLE,App: Nothing is sent. The incident waits on the SD card.
+end
+```
+
+### 2. Reviewing incidents (user opens the app later)
+
+```mermaid
+sequenceDiagram
+autonumber
+participant App as Phone App
+participant BLE as BLEHandler
+participant IM as IncidentManager
+
+Note over App,BLE: Commands arrive on the RX characteristic, are queued, and are handled every 15 ms
+opt Phone missed notifications (planned)
+    App->>BLE: PendingEventListRequest
+    BLE->>IM: Get unacknowledged event IDs
+    IM-->>BLE: Event IDs
+    BLE->>App: PendingEventList
+end
+opt App wants details for an incident
+    App->>BLE: EventInfoRequest (event_id)
+    BLE->>IM: Read distance and image timestamp
+    IM-->>BLE: distance_cm and timestamp
+    BLE->>App: EventNotification
+end
+```
+
+### 3. Transferring images and cleanup
+
+```mermaid
+sequenceDiagram
+autonumber
+participant App as Phone App
+participant BLE as BLEHandler
+participant IM as IncidentManager
+participant IC as ImageChunker
+
+App->>BLE: ImageTransferRequest (event_id, start_from_image, start_from_chunk)
+BLE->>IM: Find incident folder
+IM-->>BLE: Folder path
+loop For each image in the incident
+    BLE->>App: ImageInfo (size and total_chunks)
+    loop For each chunk, 50 ms apart
+        BLE->>BLE: Read chunk bytes from SD
+        BLE->>IC: Build ImageChunk
+        IC-->>BLE: ImageChunk
+        BLE->>App: ImageChunk
+    end
+end
+App->>BLE: EventTransferAck (event_id)
+BLE->>IM: Remove incident from list and wipe folder
+IM-->>BLE: Done
+```
+
 ## Image Chunker Demo
 
 The Image Chunker demo demonstrates how an image is:
