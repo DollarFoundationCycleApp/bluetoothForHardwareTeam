@@ -3,8 +3,8 @@
 #include <stdbool.h>
 #include <string.h>
 #include "IBDC_v0.3.2.pb.h"
-#include "pb_encode.h"
-#include "pb_decode.h"
+#include "../src/Nanopb/pb_encode.h"
+#include "../src/Nanopb/pb_decode.h"
 
 void setUp(void) {}
 void tearDown(void) {}
