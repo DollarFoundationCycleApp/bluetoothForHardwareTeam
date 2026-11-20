@@ -50,6 +50,10 @@ void reset_ble_test_state(void) {
 
 
 // --- Test Cases ---
+extern "C" {
+  void test_fifo_device_storage_limit(void);
+  void test_duplicate_device_deduplication(void);
+}
 
 void test_fifo_device_storage_limit(void) {
   reset_ble_test_state();
