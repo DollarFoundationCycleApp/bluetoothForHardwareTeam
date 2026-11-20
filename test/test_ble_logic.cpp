@@ -39,8 +39,7 @@ void mock_save_device_address(const char* macAddr) {
   }
 }
 
-// --- Unity Test Setup / Teardown ---
-void setUp(void) {
+void reset_ble_test_state(void) {
   savedDeviceCount = 0;
   for (int i = 0; i < MAX_SAVED_DEVICES; i++) {
     recentDevices[i][0] = '\0';
@@ -49,13 +48,11 @@ void setUp(void) {
   deviceReady = FALSE;
 }
 
-void tearDown(void) {
-  // Cleanup if needed
-}
 
 // --- Test Cases ---
 
 void test_fifo_device_storage_limit(void) {
+  reset_ble_test_state();
   mock_save_device_address("AA:BB:CC:DD:EE:01");
   mock_save_device_address("AA:BB:CC:DD:EE:02");
   mock_save_device_address("AA:BB:CC:DD:EE:03");
@@ -74,6 +71,7 @@ void test_fifo_device_storage_limit(void) {
 }
 
 void test_duplicate_device_deduplication(void) {
+  reset_ble_test_state();
   mock_save_device_address("11:22:33:44:55:66");
   mock_save_device_address("77:88:99:AA:BB:CC");
 
@@ -83,12 +81,4 @@ void test_duplicate_device_deduplication(void) {
   TEST_ASSERT_EQUAL_INT(2, savedDeviceCount);
   TEST_ASSERT_EQUAL_STRING("11:22:33:44:55:66", recentDevices[0]);
   TEST_ASSERT_EQUAL_STRING("77:88:99:AA:BB:CC", recentDevices[1]);
-}
-
-// --- Runner Main ---
-int main(int argc, char **argv) {
-  UNITY_BEGIN();
-  RUN_TEST(test_fifo_device_storage_limit);
-  RUN_TEST(test_duplicate_device_deduplication);
-  return UNITY_END();
 }

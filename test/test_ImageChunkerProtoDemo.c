@@ -6,9 +6,6 @@
 #include "../src/Nanopb/pb_encode.h"
 #include "../src/Nanopb/pb_decode.h"
 
-void setUp(void) {}
-void tearDown(void) {}
-
 void test_image_chunk_protobuf_roundtrip(void) {
     IDBC_ImageChunk original = IDBC_ImageChunk_init_default;
     original.event_id = 123;
@@ -36,10 +33,4 @@ void test_image_chunk_protobuf_roundtrip(void) {
     TEST_ASSERT_EQUAL_UINT32(original.total_chunks, decoded.total_chunks);
     TEST_ASSERT_EQUAL_UINT32(original.payload.size, decoded.payload.size);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(original.payload.bytes, decoded.payload.bytes, original.payload.size);
-}
-
-int main(void) {
-    UNITY_BEGIN();
-    RUN_TEST(test_image_chunk_protobuf_roundtrip);
-    return UNITY_END();
 }

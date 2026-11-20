@@ -4,9 +4,6 @@
 #include <string.h>
 #include "ImageChunker.h"
 
-void setUp(void) {}
-void tearDown(void) {}
-
 void test_normal_image_1000_bytes(void) {
     uint8_t imageBytes[1000];
     for (size_t i = 0; i < sizeof(imageBytes); i++) {
@@ -40,10 +37,4 @@ void test_normal_image_1000_bytes(void) {
 
     TEST_ASSERT_EQUAL_UINT32((uint32_t)image.size, (uint32_t)reassembledSize);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(imageBytes, reassembledImage, image.size);
-}
-
-int main(void) {
-    UNITY_BEGIN();
-    RUN_TEST(test_normal_image_1000_bytes);
-    return UNITY_END();
 }
