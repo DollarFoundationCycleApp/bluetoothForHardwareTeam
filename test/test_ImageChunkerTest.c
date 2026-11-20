@@ -4,7 +4,7 @@
 #include <string.h>
 #include "ImageChunker.h"
 
-void test_normal_image_chunking(void) {
+void test_normal_image_1000_bytes(void) {
 
     enum { TEST_IMAGE_SIZE = 1000 };
     // start by figuring out bytes for a 1000-byte image
