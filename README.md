@@ -120,6 +120,28 @@ BLE->>IM: Remove incident from list and wipe folder
 IM-->>BLE: Done
 ```
 
+## Known Issues and Backlog
+
+### Known Issues
+
+| # | Issue | Behavior / Impact | Status |
+|---|-------|-------------------|--------|
+| 1 | Camera frame-buffer overflow | `cam_hal: FB-OVF` is logged, and the first `esp_camera_fb_get` capture times out, even right after a successful camera init. PSRAM is enabled (reports 8388608 bytes). | Open. Untried: lower XCLK, higher `jpeg_quality` number, `fb_count = 1`. |
+| 2 | Capture failures are handled quietly, not fixed | A failed capture triggers a 30 s cooldown and rate-limited "queue full" logging so the storage task is not blocked or flooded. | Mitigation only; see #1 for the root cause. |
+| 3 | No automatic resume after a mid-transfer disconnect | On disconnect or unsubscribe, the device aborts the active stream (verified on hardware). The image is sent again only when a new Transfer Image request arrives; the incident stays on the SD card until then. | By design for now. |
+| 4 | Repeated trigger during a transfer | A second button press mid-stream sends another event notification while an image is still transferring. | Longer debounce added on one dev branch only; not a general fix. |
+| 5 | Recorded-data folder with no image | Some recorded data folders contain no image. | Open (T#160). |
+| 6 | Protobuf version mismatch | Generated `.pb.c/.h` files in firmware are v0.3.2. `IBDC_v0.3.3.proto/.options` exist. | Moving to v0.3.3 is pending approval. |
+| 7 | File naming mismatch | `IDBC.ino` vs. `IBDC_v0.3.x.pb.*` | Rename once a new name is chosen. |
+
+### Backlog / Deferred
+
+- **Time sync (proposed):** a device/app time sync was proposed and marked "nice to have." For now, incident timestamps use the device's own millisecond counter. Clock request/response stubs are commented-out cases and are not reachable. The settings message catch is implemented.
+- **Automatic incident detection without a button:** the intended end state. The current test flow uses a button, or a wire touched to the button pin on boards without one (`AUSTIN_COMPILES`).
+- **Performance measurements:** baseline (T#169) and image transfer times (T#191) are not yet recorded. One image was observed taking about 16 s in a single test.
+- **Buffer and stack tuning:** reduce BLE stack size and enlarge the image buffer (T#163, T#164).
+- **Test programs:** incident manager, image chunker, and BLE handler (T#158, T#159, T#218).
+
 ## Image Chunker Demo
 
 The Image Chunker demo demonstrates how an image is:
